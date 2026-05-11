@@ -69,6 +69,8 @@ else:
 
 # ========== НАСТРОЙКА ПАПОК ==========
 DOWNLOAD_DIR = "downloads"
+SESSION_FILE = "instagram_session"
+
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
     logger.info(f"📁 Создана папка: {DOWNLOAD_DIR}")
@@ -103,7 +105,7 @@ def format_size(size_bytes):
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 
 def get_instaloader(with_login=False):
-    """Создает настроенный экземпляр Instaloader"""
+    """Создает настроенный экземпляр Instaloader с поддержкой сессии"""
     import instaloader
     
     loader = instaloader.Instaloader(
@@ -118,16 +120,27 @@ def get_instaloader(with_login=False):
     )
     
     if with_login and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
+        # Пробуем загрузить существующую сессию
+        if os.path.exists(SESSION_FILE):
+            try:
+                loader.load_session(INSTAGRAM_USERNAME, SESSION_FILE)
+                logger.info(f"✅ Загружена сохраненная сессия для {INSTAGRAM_USERNAME}")
+                return loader
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось загрузить сессию: {e}")
+        
+        # Если сессии нет, пытаемся войти и сохранить сессию
         try:
             loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
-            logger.info(f"✅ Авторизован в Instagram как {INSTAGRAM_USERNAME}")
+            loader.save_session(SESSION_FILE)
+            logger.info(f"✅ Авторизован в Instagram как {INSTAGRAM_USERNAME}, сессия сохранена")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось авторизоваться: {e}")
     
     return loader
 
 async def download_instagram_post(url, message=None):
-    """Скачивание контента из Instagram - УЛУЧШЕННАЯ ВЕРСИЯ с подробной диагностикой"""
+    """Скачивание контента из Instagram с использованием сессии"""
     try:
         import instaloader
         import traceback
@@ -141,7 +154,7 @@ async def download_instagram_post(url, message=None):
         
         if message:
             if is_reel:
-                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}\n🔐 Пытаюсь авторизоваться...")
+                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}\n🔐 Подключаюсь...")
             else:
                 await message.edit_text(f"🔍 Анализирую пост {shortcode}...")
         
@@ -149,7 +162,7 @@ async def download_instagram_post(url, message=None):
         if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
             return None, "❌ Не заданы логин и пароль Instagram. Добавьте переменные INSTAGRAM_USERNAME и INSTAGRAM_PASSWORD в настройках Render."
         
-        # Настраиваем загрузчик
+        # Создаём загрузчик с поддержкой сессии
         loader = instaloader.Instaloader(
             download_videos=True,
             download_pictures=True,
@@ -158,41 +171,47 @@ async def download_instagram_post(url, message=None):
             filename_pattern="{shortcode}_{date_utc}_UTC",
             dirname_pattern=DOWNLOAD_DIR,
             max_connection_attempts=5,
-            request_timeout=60,
-            sleep=True
+            request_timeout=60
         )
         
-        # Пытаемся авторизоваться
-        try:
-            if message:
-                await message.edit_text(f"🔐 Авторизуюсь как {INSTAGRAM_USERNAME}...")
-            
-            loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
-            logger.info(f"✅ Авторизован в Instagram как {INSTAGRAM_USERNAME}")
-            
-            if message:
-                await message.edit_text(f"✅ Авторизация успешна! Получаю информацию о посте...")
-                
-        except instaloader.exceptions.BadCredentialsException:
-            return None, "❌ Неверный логин или пароль Instagram. Проверьте INSTAGRAM_USERNAME и INSTAGRAM_PASSWORD."
-        except instaloader.exceptions.TwoFactorAuthRequiredException:
-            return None, "❌ Требуется двухфакторная аутентификация. Временно отключите 2FA для этого аккаунта."
-        except instaloader.exceptions.ConnectionException as e:
-            return None, f"❌ Проблема с подключением к Instagram: {str(e)[:100]}"
-        except Exception as e:
-            return None, f"❌ Ошибка авторизации: {str(e)[:100]}"
+        # Пробуем загрузить сессию
+        if os.path.exists(SESSION_FILE):
+            try:
+                loader.load_session(INSTAGRAM_USERNAME, SESSION_FILE)
+                logger.info(f"✅ Сессия загружена для {INSTAGRAM_USERNAME}")
+                if message:
+                    await message.edit_text(f"✅ Подключение восстановлено!")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить сессию: {e}")
+                try:
+                    loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+                    loader.save_session(SESSION_FILE)
+                    logger.info(f"✅ Новая авторизация для {INSTAGRAM_USERNAME}")
+                    if message:
+                        await message.edit_text(f"✅ Авторизация успешна!")
+                except Exception as login_error:
+                    return None, f"❌ Ошибка авторизации: {str(login_error)[:150]}"
+        else:
+            try:
+                loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+                loader.save_session(SESSION_FILE)
+                logger.info(f"✅ Первая авторизация para {INSTAGRAM_USERNAME}")
+                if message:
+                    await message.edit_text(f"✅ Авторизация успешна!")
+            except Exception as e:
+                return None, f"❌ Ошибка авторизации: {str(e)[:150]}"
         
         # Получаем пост
         try:
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
             
             # Проверяем доступность поста
-            if post.is_private and not post.owner_username == INSTAGRAM_USERNAME:
+            if hasattr(post, 'is_private') and post.is_private and post.owner_username != INSTAGRAM_USERNAME:
                 return None, "❌ Пост в приватном аккаунте. Нужно подписаться на этот аккаунт."
             
             post_type = "видео" if post.is_video else "фото"
             if message:
-                await message.edit_text(f"📥 Скачиваю {post_type} (возможно, несколько файлов)...")
+                await message.edit_text(f"📥 Скачиваю {post_type}...")
             
             # Скачиваем
             loader.download_post(post, target=shortcode)
@@ -244,6 +263,7 @@ async def download_instagram_post(url, message=None):
         logger.error(f"Instagram общая ошибка: {e}")
         traceback.print_exc()
         return None, str(e)[:200]
+
 async def download_tiktok(url, message=None):
     """Скачивание из TikTok - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
@@ -511,7 +531,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 6.0</i>
+<i>Версия 6.1</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
