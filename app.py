@@ -274,48 +274,46 @@ async def download_instagram_post(url, message=None):
         return None, str(e)[:200]
 
 async def download_youtube(url, message=None):
-    """Скачивание из YouTube с поддержкой cookies и обходом блокировок"""
+    """Скачивание из YouTube через публичное API (обход блокировки)"""
     try:
-        from yt_dlp import YoutubeDL
-        
-        # Базовые опции для YouTube
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best',  # Автоматический выбор лучшего доступного формата
-            'merge_output_format': 'mp4',
-            'retries': 10,
-            'fragment_retries': 10,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
-        }
-        
-        # Пробуем добавить cookies, если есть
-        cookie_file = get_youtube_cookies()
-        if cookie_file:
-            ydl_opts['cookiefile'] = cookie_file
-            logger.info("🍪 Используем cookies для YouTube")
+        import aiohttp
         
         if message:
-            await message.edit_text("📥 Скачиваю YouTube видео...")
+            await message.edit_text("📥 Отправляю запрос к серверу...")
         
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                # Пробуем другие расширения
-                for ext in ['.mp4', '.webm', '.mkv']:
-                    test_path = filename.rsplit('.', 1)[0] + ext
-                    if os.path.exists(test_path):
-                        filename = test_path
-                        break
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
-            
-        return None, "Не удалось скачать YouTube"
+        # Используем API для получения ссылки на скачивание
+        # (это публичный API, может быть медленным)
+        api_url = f"https://api.downloadyoutubevideo.com/api/download?url={url}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                data = await resp.json()
+                
+                if data.get('success') or data.get('download_url'):
+                    download_url = data.get('download_url') or data.get('url')
+                    video_title = data.get('title', 'video')
+                    
+                    if message:
+                        await message.edit_text(f"📥 Скачиваю: {video_title[:50]}...")
+                    
+                    async with session.get(download_url) as file_resp:
+                        filename = os.path.join(DOWNLOAD_DIR, f"youtube_{int(time.time())}.mp4")
+                        with open(filename, 'wb') as f:
+                            f.write(await file_resp.read())
+                        
+                        if os.path.getsize(filename) > 0:
+                            return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
+                
+                return None, "Не удалось получить ссылку на видео"
+                
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"YouTube API ошибка: {error_msg}")
+        
+        if "Sign in to confirm" in error_msg:
+            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Попробуйте:\n• Отправить ссылку через 5-10 минут\n• Использовать другое видео"
+        else:
+            return None, f"Ошибка: {error_msg[:150]}"
         
     except Exception as e:
         error_msg = str(e)
