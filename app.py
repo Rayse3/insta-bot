@@ -7,6 +7,8 @@ import asyncio
 import re
 import time
 import requests
+import json
+import aiohttp
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -70,6 +72,7 @@ else:
 # ========== НАСТРОЙКА ПАПОК ==========
 DOWNLOAD_DIR = "downloads"
 SESSION_FILE = "instagram_session"
+YOUTUBE_COOKIES_FILE = "youtube_cookies.txt"
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
@@ -102,6 +105,12 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} ГБ"
 
+def get_youtube_cookies():
+    """Возвращает путь к файлу cookies для YouTube или None"""
+    if os.path.exists(YOUTUBE_COOKIES_FILE):
+        return YOUTUBE_COOKIES_FILE
+    return None
+
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 
 def get_instaloader(with_login=False):
@@ -115,8 +124,8 @@ def get_instaloader(with_login=False):
         post_metadata_txt_pattern="",
         filename_pattern="{shortcode}_{date_utc}_UTC",
         dirname_pattern=DOWNLOAD_DIR,
-        max_connection_attempts=3,
-        request_timeout=30
+        max_connection_attempts=5,
+        request_timeout=60
     )
     
     if with_login and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
@@ -195,7 +204,7 @@ async def download_instagram_post(url, message=None):
             try:
                 loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
                 loader.save_session(SESSION_FILE)
-                logger.info(f"✅ Первая авторизация para {INSTAGRAM_USERNAME}")
+                logger.info(f"✅ Первая авторизация для {INSTAGRAM_USERNAME}")
                 if message:
                     await message.edit_text(f"✅ Авторизация успешна!")
             except Exception as e:
@@ -265,11 +274,10 @@ async def download_instagram_post(url, message=None):
         return None, str(e)[:200]
 
 async def download_tiktok(url, message=None):
-    """Скачивание из TikTok - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Скачивание из TikTok"""
     try:
         from yt_dlp import YoutubeDL
         
-        # Опции для TikTok
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'tiktok_%(id)s.%(ext)s'),
             'quiet': True,
@@ -305,21 +313,28 @@ async def download_tiktok(url, message=None):
         return None, str(e)
 
 async def download_youtube(url, message=None):
-    """Скачивание из YouTube - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Скачивание из YouTube с поддержкой cookies и обходом блокировок"""
     try:
         from yt_dlp import YoutubeDL
         
-        # Опции для YouTube
+        # Базовые опции для YouTube
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best[height<=720]',
+            'format': 'best[height<=480]',  # Используем 480p для обхода блокировок
             'merge_output_format': 'mp4',
-            'retries': 5,
-            'fragment_retries': 5,
+            'retries': 10,
+            'fragment_retries': 10,
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
         }
+        
+        # Пробуем добавить cookies, если есть
+        cookie_file = get_youtube_cookies()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            logger.info("🍪 Используем cookies для YouTube")
         
         if message:
             await message.edit_text("📥 Скачиваю YouTube видео...")
@@ -337,11 +352,19 @@ async def download_youtube(url, message=None):
         return None, "Не удалось скачать YouTube"
         
     except Exception as e:
-        logger.error(f"YouTube ошибка: {e}")
-        return None, str(e)
+        error_msg = str(e)
+        logger.error(f"YouTube ошибка: {error_msg}")
+        
+        # Обработка конкретной ошибки блокировки
+        if "Sign in to confirm" in error_msg:
+            return None, "⚠️ YouTube требует подтверждение (защита от ботов).\n\n💡 Попробуйте:\n• Отправить ссылку чуть позже\n• Использовать другое видео\n• Если ошибка повторяется - YouTube временно блокирует запросы"
+        elif "HTTP Error 429" in error_msg:
+            return None, "⚠️ Слишком много запросов к YouTube. Подождите 5-10 минут."
+        else:
+            return None, f"Ошибка YouTube: {error_msg[:150]}"
 
 async def download_music(url=None, query=None, message=None):
-    """Скачивание музыки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Скачивание музыки"""
     try:
         from yt_dlp import YoutubeDL
         
@@ -519,6 +542,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <code>https://www.instagram.com/p/Cxample123/</code>
 <code>https://youtu.be/dQw4w9WgXcQ</code>
 <code>песня Billie Eilish bad guy</code>
+
+⚠️ <b>Примечание:</b>
+• При ошибке YouTube подождите 5-10 минут
+• Instagram требует авторизации аккаунта
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -531,7 +558,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 6.1</i>
+<i>Версия 6.2</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
@@ -562,6 +589,10 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>⏳ Долго скачивается?</b>
 • Зависит от размера файла и скорости интернета
+
+<b>⚠️ YouTube не работает?</b>
+• YouTube блокирует ботов. Подождите 5-10 минут
+• Попробуйте другое видео
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -629,7 +660,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 user_downloads = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений - ПОЛНАЯ ВЕРСИЯ"""
+    """Обработка сообщений"""
     text = update.message.text.strip()
     chat_id = update.effective_user.id
     logger.info(f"📨 Получено сообщение от {chat_id}: {text[:100]}...")
@@ -754,7 +785,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💡 Возможные причины:\n"
             f"• Пост приватный\n"
             f"• Неверная ссылка\n"
-            f"• Контент удален",
+            f"• Контент удален\n"
+            f"• YouTube: может блокировать запросы, подождите",
             parse_mode='HTML'
         )
 
@@ -871,7 +903,7 @@ def run_bot():
             
             logger.info("🚀 Запуск polling...")
             application.run_polling(drop_pending_updates=True)
-            break  # Если запустился, выходим из цикла
+            break
             
         except Exception as e:
             logger.error(f"❌ Попытка {attempt + 1} из {max_retries} не удалась: {e}")
