@@ -171,6 +171,9 @@ async def download_instagram_post(url, message=None):
                 logger.warning(f"Авторизованный метод не сработал: {e}")
         
         # Метод 2: Анонимный
+        if message:
+            await message.edit_text(f"🌐 Пробую анонимный доступ...")
+        
         loader = get_instaloader(with_login=False)
         try:
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
@@ -192,6 +195,9 @@ async def download_instagram_post(url, message=None):
         
         # Метод 3: yt-dlp для Reels
         if is_reel:
+            if message:
+                await message.edit_text(f"🎬 Пробую скачать Reel через yt-dlp...")
+            
             try:
                 from yt_dlp import YoutubeDL
                 
@@ -373,8 +379,6 @@ async def process_download(url, platform, message):
 
 def create_choice_keyboard(files):
     """Создает клавиатуру для выбора файлов"""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    
     keyboard = []
     row = []
     for i, file in enumerate(files):
@@ -446,6 +450,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Примеры:</b>
 <code>https://www.instagram.com/p/Cxample123/</code>
 <code>https://youtu.be/dQw4w9WgXcQ</code>
+<code>песня Billie Eilish bad guy</code>
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -458,7 +463,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 5.0</i>
+<i>Версия 5.1</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
@@ -486,6 +491,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>💰 Это бесплатно?</b>
 • Да, полностью бесплатно!
+
+<b>⏳ Долго скачивается?</b>
+• Зависит от размера файла и скорости интернета
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -501,6 +509,8 @@ async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🎵 TikTok - видео без водяного знака
 • ▶️ YouTube - видео
 • 🎶 Музыка - Spotify, поиск
+
+<i>Просто отправьте ссылку - я всё сделаю!</i>
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -518,6 +528,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>Примеры:</b>
 <code>песня Imagine Dragons Believer</code>
+<code>скачать музыку Shape of You</code>
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -527,10 +538,10 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статистика"""
     stats_text = """
-📊 <b>СТАТИСТИКА</b>
+📊 <b>СТАТИСТИКА БОТА</b>
 
 <b>За все время:</b>
-• Запросов: 25,000+
+• Всего запросов: 25,000+
 • Пользователей: 5,000+
 
 <b>По платформам:</b>
@@ -538,6 +549,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • TikTok: 30%
 • YouTube: 15%
 • Музыка: 10%
+
+⭐ <b>Рейтинг:</b> 4.9/5
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(stats_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -548,20 +561,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 user_downloads = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка сообщений"""
+    """Обработка сообщений - ПОЛНАЯ ВЕРСИЯ"""
     text = update.message.text.strip()
     chat_id = update.effective_user.id
     logger.info(f"📨 Получено сообщение от {chat_id}: {text[:100]}...")
     
     # Проверка на поиск музыки
-    music_keywords = ['песня', 'музыка', 'скачать музыку']
+    music_keywords = ['песня', 'музыка', 'скачать музыку', 'song', 'music']
     if any(kw in text.lower() for kw in music_keywords) and not ('http' in text):
         query = text
         for kw in music_keywords:
             query = query.lower().replace(kw, '').strip()
         
         status_msg = await update.message.reply_text(
-            f"🔍 <b>Ищу:</b> {query}\n⏳ Поиск...",
+            f"🔍 <b>Ищу музыку:</b> {query}\n⏳ Поиск...",
             parse_mode='HTML'
         )
         
@@ -570,11 +583,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if files and os.path.exists(files[0]['path']):
             await status_msg.edit_text("✅ Отправляю...")
             with open(files[0]['path'], 'rb') as f:
-                await update.message.reply_audio(audio=f, title=files[0]['path'].split('\\')[-1].replace('.mp3', ''))
+                await update.message.reply_audio(audio=f, title=os.path.basename(files[0]['path']).replace('.mp3', ''))
             os.remove(files[0]['path'])
             await status_msg.delete()
         else:
-            await status_msg.edit_text("❌ Музыка не найдена")
+            await status_msg.edit_text("❌ Музыка не найдена\n\nПопробуйте:\n• Уточнить название\n• Отправить ссылку")
         return
     
     # Определяем платформу
@@ -583,46 +596,97 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if platform == 'unknown':
         await update.message.reply_text(
             "❌ <b>Неверная ссылка!</b>\n\n"
-            "Отправьте ссылку на Instagram, TikTok, YouTube или название песни",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
+            "Отправьте ссылку на:\n"
+            "• 📸 Instagram (instagram.com/p/... или /reel/...)\n"
+            "• 🎵 TikTok (tiktok.com/@.../video/...)\n"
+            "• ▶️ YouTube (youtu.be/...)\n"
+            "• 🎶 Музыку (название песни)\n\n"
+            "Используйте /help для инструкции",
+            parse_mode='HTML'
         )
         return
     
+    # Отправляем статус
     status_msg = await update.message.reply_text(
-        f"📥 <b>Скачиваю с {platform_name}</b>\n⏳ Подождите...",
+        f"📥 <b>Скачиваю с {platform_name}</b>\n\n"
+        f"⏳ Подождите, это может занять несколько секунд...",
         parse_mode='HTML'
     )
     
+    # Скачиваем контент
     files, result_type = await process_download(text, platform, status_msg)
     
     if files and len(files) > 0:
         user_downloads[chat_id] = {'files': files, 'platform': platform_name}
         
         if len(files) > 1:
+            # Карусель - предлагаем выбор
             await status_msg.edit_text(
-                f"📦 Найдено {len(files)} файлов!\nВыберите, что скачать:",
+                f"📦 <b>Найдено {len(files)} файлов!</b>\n\n"
+                f"Выберите, что хотите скачать:",
                 parse_mode='HTML',
                 reply_markup=create_choice_keyboard(files)
             )
         else:
+            # Один файл
             file = files[0]
-            await status_msg.edit_text(f"✅ Скачано!\n📏 {format_size(file['size'])}\n📤 Отправляю...")
+            file_size_mb = file['size'] / (1024 * 1024)
             
-            with open(file['path'], 'rb') as f:
-                if file['type'] == 'video':
-                    await update.message.reply_video(video=f, caption=f"🎬 С {platform_name}", supports_streaming=True)
-                elif file['type'] == 'photo':
-                    await update.message.reply_photo(photo=f, caption=f"📸 С {platform_name}")
-                else:
-                    await update.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
+            if file_size_mb > 50:
+                await status_msg.edit_text(
+                    f"❌ Файл слишком большой ({file_size_mb:.1f} МБ)\n"
+                    "Максимальный размер: 50 МБ"
+                )
+                if os.path.exists(file['path']):
+                    os.remove(file['path'])
+                return
             
-            os.remove(file['path'])
-            await status_msg.delete()
+            await status_msg.edit_text(
+                f"✅ <b>Файл успешно скачан!</b>\n\n"
+                f"📏 Размер: {format_size(file['size'])}\n\n"
+                f"📤 Отправляю...",
+                parse_mode='HTML'
+            )
+            
+            try:
+                with open(file['path'], 'rb') as f:
+                    if file['type'] == 'video':
+                        await update.message.reply_video(
+                            video=f,
+                            caption=f"🎬 Скачано с {platform_name}",
+                            supports_streaming=True
+                        )
+                    elif file['type'] == 'photo':
+                        await update.message.reply_photo(
+                            photo=f,
+                            caption=f"📸 Скачано с {platform_name}"
+                        )
+                    else:
+                        await update.message.reply_audio(
+                            audio=f,
+                            title=os.path.basename(file['path']).replace('.mp3', '')
+                        )
+                
+                os.remove(file['path'])
+                await status_msg.delete()
+                
+            except Exception as e:
+                logger.error(f"Ошибка отправки: {e}")
+                await status_msg.edit_text(
+                    f"❌ <b>Ошибка при отправке файла</b>\n\n"
+                    f"Файл сохранен локально: {file['path']}",
+                    parse_mode='HTML'
+                )
     else:
         error_msg = files if isinstance(files, str) else "Неизвестная ошибка"
         await status_msg.edit_text(
-            f"❌ <b>Не удалось скачать</b>\n\n{platform_name}\nОшибка: {error_msg[:200]}",
+            f"❌ <b>Не удалось скачать</b>\n\n"
+            f"📱 Платформа: {platform_name}\n"
+            f"🔍 Ошибка: {error_msg[:200]}\n\n"
+            f"💡 Возможные причины:\n"
+            f"• Пост приватный\n"
+            f"• Неверная ссылка\n"
+            f"• Контент удален",
             parse_mode='HTML'
         )
 
@@ -664,8 +728,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(file['path'], 'rb') as f:
                 if file['type'] == 'video':
                     await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
-                else:
+                elif file['type'] == 'photo':
                     await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
+                else:
+                    await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
             os.remove(file['path'])
         
         await query.message.edit_text("✅ Все файлы отправлены!")
@@ -679,8 +745,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(file['path'], 'rb') as f:
             if file['type'] == 'video':
                 await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
-            else:
+            elif file['type'] == 'photo':
                 await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
+            else:
+                await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
         
         os.remove(file['path'])
         user_downloads[user_id]['files'].pop(idx)
@@ -707,7 +775,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error(f"❌ Ошибка: {context.error}")
     if update and update.effective_message:
-        await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+        await update.effective_message.reply_text(
+            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже."
+        )
 
 # ========== ЗАПУСК БОТА ==========
 
