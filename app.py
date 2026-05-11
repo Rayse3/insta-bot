@@ -10,7 +10,7 @@ import requests
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     logger.info(f"🌐 Запуск Flask на порту {port}")
     try:
-        app_flask.run(host='0.0.0.0', port=port)
+        app_flask.run(host='0.0.0.0', port=port, threaded=True)
     except Exception as e:
         logger.error(f"❌ Flask ошибка: {e}")
 
@@ -127,7 +127,7 @@ def get_instaloader(with_login=False):
     return loader
 
 async def download_instagram_post(url, message=None):
-    """Скачивание контента из Instagram"""
+    """Скачивание контента из Instagram - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         import instaloader
         
@@ -140,100 +140,95 @@ async def download_instagram_post(url, message=None):
         
         if message:
             if is_reel:
-                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}...")
+                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}\n🔐 Использую авторизацию...")
             else:
                 await message.edit_text(f"🔍 Анализирую пост {shortcode}...")
         
-        files = []
+        # ПРОВЕРЯЕМ НАЛИЧИЕ ЛОГИНА И ПАРОЛЯ
+        if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+            return None, "Не заданы логин и пароль Instagram. Добавьте переменные INSTAGRAM_USERNAME и INSTAGRAM_PASSWORD в настройках Render."
         
-        # Метод 1: С авторизацией
-        if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
+        # НАСТРОЙКА С АВТОРИЗАЦИЕЙ
+        loader = instaloader.Instaloader(
+            download_videos=True,
+            download_pictures=True,
+            save_metadata=False,
+            post_metadata_txt_pattern="",
+            filename_pattern="{shortcode}_{date_utc}_UTC",
+            dirname_pattern=DOWNLOAD_DIR,
+            max_connection_attempts=5,
+            request_timeout=60
+        )
+        
+        # Пытаемся авторизоваться
+        try:
+            loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+            logger.info(f"✅ Авторизован в Instagram как {INSTAGRAM_USERNAME}")
             if message:
-                await message.edit_text(f"🔐 Использую авторизованный доступ...")
-            
-            loader = get_instaloader(with_login=True)
-            try:
-                post = instaloader.Post.from_shortcode(loader.context, shortcode)
-                loader.download_post(post, target=shortcode)
-                
-                for file in os.listdir(DOWNLOAD_DIR):
-                    if shortcode in file:
-                        file_path = os.path.join(DOWNLOAD_DIR, file)
-                        if file.endswith('.mp4'):
-                            files.append({'path': file_path, 'type': 'video', 'size': os.path.getsize(file_path)})
-                        elif file.endswith(('.jpg', '.png')):
-                            files.append({'path': file_path, 'type': 'photo', 'size': os.path.getsize(file_path)})
-                
-                if files:
-                    logger.info(f"✅ Авторизованный метод: скачано {len(files)} файлов")
-                    return files, 'carousel' if len(files) > 1 else 'single'
-            except Exception as e:
-                logger.warning(f"Авторизованный метод не сработал: {e}")
+                await message.edit_text(f"✅ Авторизация успешна! Скачиваю...")
+        except Exception as e:
+            logger.error(f"❌ Ошибка авторизации: {e}")
+            return None, f"Не удалось авторизоваться в Instagram. Проверьте логин и пароль. Ошибка: {str(e)[:100]}"
         
-        # Метод 2: Анонимный
-        if message:
-            await message.edit_text(f"🌐 Пробую анонимный доступ...")
-        
-        loader = get_instaloader(with_login=False)
+        # Получаем пост
         try:
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
+            
+            # Определяем тип контента
+            if post.is_video:
+                if message:
+                    await message.edit_text(f"🎬 Скачиваю видео...")
+            else:
+                if message:
+                    await message.edit_text(f"📸 Скачиваю фото...")
+            
+            # Скачиваем
             loader.download_post(post, target=shortcode)
             
+            # Ищем скачанные файлы
+            files = []
             for file in os.listdir(DOWNLOAD_DIR):
-                if shortcode in file:
+                if shortcode in file and (file.endswith('.mp4') or file.endswith('.jpg') or file.endswith('.png')):
                     file_path = os.path.join(DOWNLOAD_DIR, file)
-                    if file.endswith('.mp4'):
-                        files.append({'path': file_path, 'type': 'video', 'size': os.path.getsize(file_path)})
-                    elif file.endswith(('.jpg', '.png')):
-                        files.append({'path': file_path, 'type': 'photo', 'size': os.path.getsize(file_path)})
+                    if os.path.getsize(file_path) > 0:
+                        file_type = 'video' if file.endswith('.mp4') else 'photo'
+                        files.append({'path': file_path, 'type': file_type, 'size': os.path.getsize(file_path)})
             
             if files:
-                logger.info(f"✅ Анонимный метод: скачано {len(files)} файлов")
+                logger.info(f"✅ Скачано {len(files)} файлов")
                 return files, 'carousel' if len(files) > 1 else 'single'
+            else:
+                return None, "Файлы не найдены после скачивания"
+                
+        except instaloader.exceptions.LoginRequiredException:
+            return None, "Требуется авторизация. Проверьте логин и пароль."
+        except instaloader.exceptions.ProfileNotExistsException:
+            return None, "Пост не найден. Возможно, он удален или ссылка неверна."
+        except instaloader.exceptions.PrivateProfileNotFollowedException:
+            return None, "Пост в приватном аккаунте. Нужно подписаться на этот аккаунт."
         except Exception as e:
-            logger.warning(f"Анонимный метод не сработал: {e}")
-        
-        # Метод 3: yt-dlp для Reels
-        if is_reel:
-            if message:
-                await message.edit_text(f"🎬 Пробую скачать Reel через yt-dlp...")
-            
-            try:
-                from yt_dlp import YoutubeDL
-                
-                ydl_opts = {
-                    'outtmpl': os.path.join(DOWNLOAD_DIR, f'reel_{shortcode}.%(ext)s'),
-                    'quiet': True,
-                    'no_warnings': True,
-                    'format': 'best',
-                }
-                
-                with YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(url, download=True)
-                    
-                    for file in os.listdir(DOWNLOAD_DIR):
-                        if 'reel' in file and file.endswith('.mp4'):
-                            file_path = os.path.join(DOWNLOAD_DIR, file)
-                            return [{'path': file_path, 'type': 'video', 'size': os.path.getsize(file_path)}], 'single'
-            except Exception as e:
-                logger.warning(f"yt-dlp не сработал: {e}")
-        
-        return None, "Не удалось скачать пост"
+            logger.error(f"Ошибка скачивания: {e}")
+            return None, f"Ошибка: {str(e)[:150]}"
         
     except Exception as e:
         logger.error(f"Instagram ошибка: {e}")
-        return None, str(e)
+        return None, str(e)[:200]
 
 async def download_tiktok(url, message=None):
-    """Скачивание из TikTok"""
+    """Скачивание из TikTok - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         from yt_dlp import YoutubeDL
         
+        # Опции для TikTok
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'tiktok_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'format': 'best',
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extract_flat': False,
+            'retries': 5,
+            'fragment_retries': 5,
         }
         
         if message:
@@ -250,7 +245,7 @@ async def download_tiktok(url, message=None):
                         filename = test_path
                         break
             
-            if os.path.exists(filename):
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
                 return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
             
         return None, "Не удалось скачать TikTok"
@@ -260,16 +255,20 @@ async def download_tiktok(url, message=None):
         return None, str(e)
 
 async def download_youtube(url, message=None):
-    """Скачивание из YouTube"""
+    """Скачивание из YouTube - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         from yt_dlp import YoutubeDL
         
+        # Опции для YouTube
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'format': 'best[height<=720]',
             'merge_output_format': 'mp4',
+            'retries': 5,
+            'fragment_retries': 5,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         }
         
         if message:
@@ -282,7 +281,7 @@ async def download_youtube(url, message=None):
             if not os.path.exists(filename):
                 filename = filename.replace('.webm', '.mp4')
             
-            if os.path.exists(filename):
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
                 return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
             
         return None, "Не удалось скачать YouTube"
@@ -292,9 +291,24 @@ async def download_youtube(url, message=None):
         return None, str(e)
 
 async def download_music(url=None, query=None, message=None):
-    """Скачивание музыки"""
+    """Скачивание музыки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     try:
         from yt_dlp import YoutubeDL
+        
+        def progress_hook(d):
+            if d['status'] == 'downloading' and message:
+                if 'total_bytes' in d:
+                    percent = d['downloaded_bytes'] / d['total_bytes'] * 100
+                    if hasattr(download_music, 'last_update'):
+                        if time.time() - download_music.last_update > 1:
+                            download_music.last_update = time.time()
+                            asyncio.create_task(message.edit_text(
+                                f"🎵 Скачиваю... {percent:.0f}%"
+                            ))
+                    else:
+                        download_music.last_update = time.time()
+        
+        download_music.last_update = 0
         
         if query:
             search_query = f"ytsearch:{query}"
@@ -308,6 +322,8 @@ async def download_music(url=None, query=None, message=None):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
+                'progress_hooks': [progress_hook],
+                'retries': 5,
             }
         else:
             ydl_opts = {
@@ -320,6 +336,8 @@ async def download_music(url=None, query=None, message=None):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
+                'progress_hooks': [progress_hook],
+                'retries': 5,
             }
         
         if message:
@@ -336,7 +354,7 @@ async def download_music(url=None, query=None, message=None):
             filename = ydl.prepare_filename(info)
             filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
             
-            if os.path.exists(filename):
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
                 return [{'path': filename, 'type': 'audio', 'size': os.path.getsize(filename)}], 'single'
                 
         return None, "Не удалось скачать музыку"
@@ -463,7 +481,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 5.1</i>
+<i>Версия 6.0</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
@@ -574,7 +592,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query = query.lower().replace(kw, '').strip()
         
         status_msg = await update.message.reply_text(
-            f"🔍 <b>Ищу музыку:</b> {query}\n⏳ Поиск...",
+            f"🔍 <b>Ищу:</b> {query}\n⏳ Поиск...",
             parse_mode='HTML'
         )
         
@@ -782,28 +800,38 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК БОТА ==========
 
 def run_bot():
-    """Запускает Telegram бота"""
-    logger.info("🤖 Инициализация Telegram бота...")
+    """Запускает Telegram бота с повторными попытками"""
+    import time
     
-    try:
-        application = Application.builder().token(BOT_TOKEN).build()
-        logger.info("✅ Приложение создано")
-        
-        # Добавляем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_error_handler(error_handler)
-        logger.info("✅ Обработчики добавлены")
-        
-        logger.info("🚀 Запуск polling...")
-        application.run_polling(drop_pending_updates=True)
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    logger.info("🤖 Инициализация Telegram бота...")
+    max_retries = 5
+    retry_delay = 3
+    
+    for attempt in range(max_retries):
+        try:
+            application = Application.builder().token(BOT_TOKEN).build()
+            logger.info("✅ Приложение создано")
+            
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            application.add_handler(CallbackQueryHandler(button_handler))
+            application.add_error_handler(error_handler)
+            logger.info("✅ Обработчики добавлены")
+            
+            logger.info("🚀 Запуск polling...")
+            application.run_polling(drop_pending_updates=True)
+            break  # Если запустился, выходим из цикла
+            
+        except Exception as e:
+            logger.error(f"❌ Попытка {attempt + 1} из {max_retries} не удалась: {e}")
+            if attempt < max_retries - 1:
+                logger.info(f"🔄 Повторная попытка через {retry_delay} секунд...")
+                time.sleep(retry_delay)
+            else:
+                logger.critical("❌ Бот не смог запуститься после нескольких попыток. Завершение работы.")
+                traceback.print_exc()
+                sys.exit(1)
 
 # ========== ГЛАВНЫЙ ЗАПУСК ==========
 
@@ -817,6 +845,9 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask сервер запущен")
+    
+    # Небольшая задержка для Flask перед запуском бота
+    time.sleep(2)
     
     # Запускаем бота
     logger.info("🤖 Запуск Telegram бота...")
