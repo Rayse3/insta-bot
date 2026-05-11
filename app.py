@@ -1,53 +1,94 @@
 import os
+import sys
 import logging
-import re
-import asyncio
 import threading
+import traceback
+import asyncio
+import re
 import time
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.error import Conflict
-from flask import Flask
 
-# ========== НАСТРОЙКА FLASK ДЛЯ RENDER ==========
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+logger.info("=" * 50)
+logger.info("🚀 БОТ НАЧИНАЕТ ЗАПУСК")
+logger.info("=" * 50)
+
+# ========== ПРОВЕРКА ИМПОРТОВ ==========
+logger.info("📦 Проверка импортов...")
+
+try:
+    from flask import Flask
+    logger.info("✅ Flask импортирован")
+except Exception as e:
+    logger.error(f"❌ Ошибка импорта Flask: {e}")
+    sys.exit(1)
+
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+    logger.info("✅ python-telegram-bot импортирован")
+except Exception as e:
+    logger.error(f"❌ Ошибка импорта telegram: {e}")
+    sys.exit(1)
+
+try:
+    import instaloader
+    logger.info("✅ instaloader импортирован")
+except Exception as e:
+    logger.error(f"❌ Ошибка импорта instaloader: {e}")
+
+try:
+    import yt_dlp
+    logger.info("✅ yt-dlp импортирован")
+except Exception as e:
+    logger.error(f"❌ Ошибка импорта yt-dlp: {e}")
+
+# ========== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
+logger.info("🔐 Проверка переменных окружения...")
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+INSTAGRAM_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "")
+INSTAGRAM_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "")
+
+if not BOT_TOKEN:
+    logger.error("❌ BOT_TOKEN не задан в переменных окружения!")
+    logger.error("💡 Добавьте переменную BOT_TOKEN в настройках Render")
+    sys.exit(1)
+
+logger.info("✅ BOT_TOKEN загружен")
+if INSTAGRAM_USERNAME:
+    logger.info(f"✅ Instagram логин: {INSTAGRAM_USERNAME}")
+else:
+    logger.warning("⚠️ Instagram логин не задан (Reels могут не работать)")
+
+# ========== НАСТРОЙКА ПАПОК ==========
+DOWNLOAD_DIR = "downloads"
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+    logger.info(f"📁 Создана папка: {DOWNLOAD_DIR}")
+
+# ========== FLASK ДЛЯ HEALTH CHECK ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
-def index():
-    return "🤖 Instagram Downloader Bot is running!"
-
 @app_flask.route('/health')
 def health():
     return "OK", 200
 
 def run_flask():
-    """Запускает Flask сервер в отдельном потоке для health check"""
+    """Запускает Flask сервер для health check"""
     port = int(os.environ.get("PORT", 8080))
-    app_flask.run(host='0.0.0.0', port=port)
-
-# ========== НАСТРОЙКА БОТА ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8542884336:AAE55W8PifheY3u65-vxa53BfUH7I2C8ajk")
-
-# Instagram логин (обязателен для Reels!)
-INSTAGRAM_USERNAME = os.environ.get("INSTAGRAM_USERNAME", "")
-INSTAGRAM_PASSWORD = os.environ.get("INSTAGRAM_PASSWORD", "")
-
-# Создаем папки для скачивания
-DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+    logger.info(f"🌐 Запуск Flask на порту {port}")
+    try:
+        app_flask.run(host='0.0.0.0', port=port)
+    except Exception as e:
+        logger.error(f"❌ Flask ошибка: {e}")
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
@@ -58,19 +99,6 @@ def format_size(size_bytes):
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} ГБ"
-
-def clear_downloads_folder():
-    """Очищает папку загрузок"""
-    if not os.path.exists(DOWNLOAD_DIR):
-        os.makedirs(DOWNLOAD_DIR)
-    
-    for file in os.listdir(DOWNLOAD_DIR):
-        try:
-            file_path = os.path.join(DOWNLOAD_DIR, file)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить {file}: {e}")
 
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 
@@ -112,7 +140,7 @@ async def download_instagram_post(url, message=None):
         
         if message:
             if is_reel:
-                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}\n⏳ Использую авторизованный доступ...")
+                await message.edit_text(f"🎬 Скачиваю Reel: {shortcode}...")
             else:
                 await message.edit_text(f"🔍 Анализирую пост {shortcode}...")
         
@@ -143,9 +171,6 @@ async def download_instagram_post(url, message=None):
                 logger.warning(f"Авторизованный метод не сработал: {e}")
         
         # Метод 2: Анонимный
-        if message:
-            await message.edit_text(f"🌐 Пробую анонимный доступ...")
-        
         loader = get_instaloader(with_login=False)
         try:
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
@@ -167,9 +192,6 @@ async def download_instagram_post(url, message=None):
         
         # Метод 3: yt-dlp для Reels
         if is_reel:
-            if message:
-                await message.edit_text(f"🎬 Пробую скачать Reel через yt-dlp...")
-            
             try:
                 from yt_dlp import YoutubeDL
                 
@@ -188,7 +210,7 @@ async def download_instagram_post(url, message=None):
                             file_path = os.path.join(DOWNLOAD_DIR, file)
                             return [{'path': file_path, 'type': 'video', 'size': os.path.getsize(file_path)}], 'single'
             except Exception as e:
-                logger.error(f"yt-dlp метод не сработал: {e}")
+                logger.warning(f"yt-dlp не сработал: {e}")
         
         return None, "Не удалось скачать пост"
         
@@ -209,7 +231,7 @@ async def download_tiktok(url, message=None):
         }
         
         if message:
-            await message.edit_text("🎵 Скачиваю TikTok видео...\n⏳ Это может занять несколько секунд")
+            await message.edit_text("🎵 Скачиваю TikTok видео...")
         
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -245,7 +267,7 @@ async def download_youtube(url, message=None):
         }
         
         if message:
-            await message.edit_text("📥 Начинаю загрузку YouTube видео...")
+            await message.edit_text("📥 Скачиваю YouTube видео...")
         
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -351,6 +373,8 @@ async def process_download(url, platform, message):
 
 def create_choice_keyboard(files):
     """Создает клавиатуру для выбора файлов"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    
     keyboard = []
     row = []
     for i, file in enumerate(files):
@@ -366,9 +390,8 @@ def create_choice_keyboard(files):
     keyboard.append([InlineKeyboardButton("◀️ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(keyboard)
 
-# ========== КЛАВИАТУРЫ ==========
-
 def get_main_keyboard():
+    """Главная клавиатура"""
     keyboard = [
         [InlineKeyboardButton("📖 Инструкция", callback_data="help"),
          InlineKeyboardButton("📊 Статистика", callback_data="stats")],
@@ -380,13 +403,16 @@ def get_main_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard():
+    """Кнопка возврата"""
     keyboard = [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     return InlineKeyboardMarkup(keyboard)
 
-# ========== КОМАНДЫ ==========
+# ========== КОМАНДЫ БОТА ==========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
     user = update.effective_user
+    logger.info(f"📨 Команда /start от {user.first_name} (id: {user.id})")
     
     welcome_text = f"""
 🌟 <b>ДОБРО ПОЖАЛОВАТЬ, {user.first_name}!</b>
@@ -404,14 +430,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎯 <b>Просто отправьте ссылку!</b>
 """
-    
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode='HTML',
-        reply_markup=get_main_keyboard()
-    )
+    await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=get_main_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help"""
     help_text = """
 📖 <b>ИНСТРУКЦИЯ</b>
 
@@ -421,25 +443,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • YouTube: youtu.be/...
 • Музыка: песня Imagine Dragons
 
-<b>📌 Особенности:</b>
-• Reels скачиваются через авторизацию
-• Карусели с выбором файлов
-• YouTube с прогрессом загрузки
+<b>Примеры:</b>
+<code>https://www.instagram.com/p/Cxample123/</code>
+<code>https://youtu.be/dQw4w9WgXcQ</code>
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            help_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            help_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """О боте"""
     about_text = """
 🤖 <b>О БОТЕ</b>
 
@@ -452,22 +466,15 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • YouTube (видео)
 • Музыка (поиск)
 
-<i>Работает 24/7 в облаке!</i>
+<i>Работает 24/7 в облаке Render!</i>
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            about_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            about_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FAQ"""
     faq_text = """
 ❓ <b>FAQ</b>
 
@@ -481,19 +488,12 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Да, полностью бесплатно!
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            faq_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            faq_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Платформы"""
     platforms_text = """
 📱 <b>ПЛАТФОРМЫ</b>
 
@@ -503,19 +503,12 @@ async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🎶 Музыка - Spotify, поиск
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            platforms_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            platforms_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Музыка"""
     music_text = """
 🎵 <b>СКАЧИВАНИЕ МУЗЫКИ</b>
 
@@ -527,19 +520,12 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <code>песня Imagine Dragons Believer</code>
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            music_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            music_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика"""
     stats_text = """
 📊 <b>СТАТИСТИКА</b>
 
@@ -554,23 +540,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Музыка: 10%
 """
     if update.callback_query:
-        await update.callback_query.message.edit_text(
-            stats_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.callback_query.message.edit_text(stats_text, parse_mode='HTML', reply_markup=get_back_keyboard())
     else:
-        await update.message.reply_text(
-            stats_text,
-            parse_mode='HTML',
-            reply_markup=get_back_keyboard()
-        )
+        await update.message.reply_text(stats_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 # Хранилище для временных данных
 user_downloads = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка сообщений"""
     text = update.message.text.strip()
+    chat_id = update.effective_user.id
+    logger.info(f"📨 Получено сообщение от {chat_id}: {text[:100]}...")
     
     # Проверка на поиск музыки
     music_keywords = ['песня', 'музыка', 'скачать музыку']
@@ -616,8 +597,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     files, result_type = await process_download(text, platform, status_msg)
     
     if files and len(files) > 0:
-        user_id = update.effective_user.id
-        user_downloads[user_id] = {'files': files, 'platform': platform_name}
+        user_downloads[chat_id] = {'files': files, 'platform': platform_name}
         
         if len(files) > 1:
             await status_msg.edit_text(
@@ -647,6 +627,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню"""
     query = update.callback_query
     await query.answer()
     await query.message.edit_text(
@@ -656,6 +637,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопок"""
     query = update.callback_query
     user_id = update.effective_user.id
     
@@ -722,40 +704,50 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("❌ Отменено", reply_markup=get_main_keyboard())
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Ошибка: {context.error}")
+    """Обработчик ошибок"""
+    logger.error(f"❌ Ошибка: {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
 
 # ========== ЗАПУСК БОТА ==========
+
 def run_bot():
     """Запускает Telegram бота"""
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_error_handler(error_handler)
+    logger.info("🤖 Инициализация Telegram бота...")
     
-    print("🤖 Telegram бот запущен!")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        logger.info("✅ Приложение создано")
+        
+        # Добавляем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_error_handler(error_handler)
+        logger.info("✅ Обработчики добавлены")
+        
+        logger.info("🚀 Запуск polling...")
+        application.run_polling(drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 # ========== ГЛАВНЫЙ ЗАПУСК ==========
+
 if __name__ == "__main__":
-    # Очищаем папку downloads при запуске
-    clear_downloads_folder()
+    logger.info("=" * 50)
+    logger.info("🚀 ЗАПУСК БОТА НА RENDER")
+    logger.info("=" * 50)
     
-    print("""
-╔═══════════════════════════════════════════════╗
-║   🚀 UNIVERSAL MEDIA DOWNLOADER BOT v5.0     ║
-║   📱 Instagram | TikTok | YouTube | Music    ║
-╚═══════════════════════════════════════════════╝
-    """)
-    
-    # Запускаем Flask в отдельном потоке для Render health check
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
+    # Запускаем Flask в отдельном потоке
+    logger.info("📡 Запуск Flask сервера для health check...")
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("✅ Flask сервер запущен для health check")
+    logger.info("✅ Flask сервер запущен")
     
     # Запускаем бота
+    logger.info("🤖 Запуск Telegram бота...")
     run_bot()
