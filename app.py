@@ -322,7 +322,7 @@ async def download_youtube(url, message=None):
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best[height<=480]',  # Используем 480p для обхода блокировок
+            'format': 'best[height<=480]',
             'merge_output_format': 'mp4',
             'retries': 10,
             'fragment_retries': 10,
@@ -355,9 +355,9 @@ async def download_youtube(url, message=None):
         error_msg = str(e)
         logger.error(f"YouTube ошибка: {error_msg}")
         
-        # Обработка конкретной ошибки блокировки
+        # Понятное сообщение для пользователя
         if "Sign in to confirm" in error_msg:
-            return None, "⚠️ YouTube требует подтверждение (защита от ботов).\n\n💡 Попробуйте:\n• Отправить ссылку чуть позже\n• Использовать другое видео\n• Если ошибка повторяется - YouTube временно блокирует запросы"
+            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Чтобы исправить:\n1. Установите расширение 'Get cookies.txt' в Chrome\n2. Войдите в YouTube и экспортируйте cookies\n3. Загрузите файл 'youtube_cookies.txt' в репозиторий\n4. Перезапустите бота"
         elif "HTTP Error 429" in error_msg:
             return None, "⚠️ Слишком много запросов к YouTube. Подождите 5-10 минут."
         else:
@@ -882,10 +882,20 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК БОТА ==========
 
 def run_bot():
-    """Запускает Telegram бота с повторными попытками"""
+    """Запускает Telegram бота с повторными попытками и принудительным удалением вебхука"""
     import time
+    import requests
     
     logger.info("🤖 Инициализация Telegram бота...")
+    
+    # ПРИНУДИТЕЛЬНО УДАЛЯЕМ ВЕБХУК ПЕРЕД ЗАПУСКОМ (РЕШАЕТ ОШИБКУ 409)
+    try:
+        webhook_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
+        response = requests.get(webhook_url)
+        logger.info(f"✅ Вебхук удалён: {response.json()}")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось удалить вебхук: {e}")
+    
     max_retries = 5
     retry_delay = 3
     
