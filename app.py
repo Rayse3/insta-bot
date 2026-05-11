@@ -273,6 +273,109 @@ async def download_instagram_post(url, message=None):
         traceback.print_exc()
         return None, str(e)[:200]
 
+async def download_youtube(url, message=None):
+    """Скачивание из YouTube с поддержкой cookies и обходом блокировок"""
+    try:
+        from yt_dlp import YoutubeDL
+        
+        # Базовые опции для YouTube
+        ydl_opts = {
+            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'best',  # Автоматический выбор лучшего доступного формата
+            'merge_output_format': 'mp4',
+            'retries': 10,
+            'fragment_retries': 10,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
+        }
+        
+        # Пробуем добавить cookies, если есть
+        cookie_file = get_youtube_cookies()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            logger.info("🍪 Используем cookies для YouTube")
+        
+        if message:
+            await message.edit_text("📥 Скачиваю YouTube видео...")
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            if not os.path.exists(filename):
+                # Пробуем другие расширения
+                for ext in ['.mp4', '.webm', '.mkv']:
+                    test_path = filename.rsplit('.', 1)[0] + ext
+                    if os.path.exists(test_path):
+                        filename = test_path
+                        break
+            
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
+            
+        return None, "Не удалось скачать YouTube"
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"YouTube ошибка: {error_msg}")
+        
+        # Понятное сообщение для пользователя
+        if "Sign in to confirm" in error_msg:
+            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Чтобы исправить:\n1. Установите расширение 'Get cookies.txt' в Chrome\n2. Войдите в YouTube и экспортируйте cookies\n3. Загрузите файл 'youtube_cookies.txt' в репозиторий\n4. Перезапустите бота"
+        elif "Requested format is not available" in error_msg:
+            return None, "⚠️ Формат видео недоступен.\n\n💡 Попробуйте:\n• Ссылку на обычное видео (не Shorts)\n• Или подождите несколько минут"
+        elif "HTTP Error 429" in error_msg:
+            return None, "⚠️ Слишком много запросов к YouTube. Подождите 5-10 минут."
+        else:
+            return None, f"Ошибка YouTube: {error_msg[:150]}"
+
+async def download_youtube_shorts(url, message=None):
+    """Специальная обработка для YouTube Shorts"""
+    try:
+        from yt_dlp import YoutubeDL
+        
+        # Опции специально для Shorts
+        ydl_opts = {
+            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+            'merge_output_format': 'mp4',
+            'retries': 10,
+            'fragment_retries': 10,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }
+        
+        cookie_file = get_youtube_cookies()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            logger.info("🍪 Используем cookies для YouTube Shorts")
+        
+        if message:
+            await message.edit_text("📥 Скачиваю YouTube Shorts...")
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            if not os.path.exists(filename):
+                for ext in ['.mp4', '.webm']:
+                    test_path = filename.rsplit('.', 1)[0] + ext
+                    if os.path.exists(test_path):
+                        filename = test_path
+                        break
+            
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
+                
+        return None, "Не удалось скачать Shorts"
+        
+    except Exception as e:
+        logger.error(f"Shorts ошибка: {e}")
+        return None, str(e)[:150]
+
 async def download_tiktok(url, message=None):
     """Скачивание из TikTok"""
     try:
@@ -311,57 +414,6 @@ async def download_tiktok(url, message=None):
     except Exception as e:
         logger.error(f"TikTok ошибка: {e}")
         return None, str(e)
-
-async def download_youtube(url, message=None):
-    """Скачивание из YouTube с поддержкой cookies и обходом блокировок"""
-    try:
-        from yt_dlp import YoutubeDL
-        
-        # Базовые опции для YouTube
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best[height<=480]',
-            'merge_output_format': 'mp4',
-            'retries': 10,
-            'fragment_retries': 10,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
-        }
-        
-        # Пробуем добавить cookies, если есть
-        cookie_file = get_youtube_cookies()
-        if cookie_file:
-            ydl_opts['cookiefile'] = cookie_file
-            logger.info("🍪 Используем cookies для YouTube")
-        
-        if message:
-            await message.edit_text("📥 Скачиваю YouTube видео...")
-        
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                filename = filename.replace('.webm', '.mp4')
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
-            
-        return None, "Не удалось скачать YouTube"
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"YouTube ошибка: {error_msg}")
-        
-        # Понятное сообщение для пользователя
-        if "Sign in to confirm" in error_msg:
-            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Чтобы исправить:\n1. Установите расширение 'Get cookies.txt' в Chrome\n2. Войдите в YouTube и экспортируйте cookies\n3. Загрузите файл 'youtube_cookies.txt' в репозиторий\n4. Перезапустите бота"
-        elif "HTTP Error 429" in error_msg:
-            return None, "⚠️ Слишком много запросов к YouTube. Подождите 5-10 минут."
-        else:
-            return None, f"Ошибка YouTube: {error_msg[:150]}"
 
 async def download_music(url=None, query=None, message=None):
     """Скачивание музыки"""
@@ -459,7 +511,11 @@ async def process_download(url, platform, message):
         elif platform == 'tiktok':
             return await download_tiktok(url, message)
         elif platform == 'youtube':
-            return await download_youtube(url, message)
+            # Проверяем, является ли ссылка Shorts
+            if 'shorts' in url.lower():
+                return await download_youtube_shorts(url, message)
+            else:
+                return await download_youtube(url, message)
         elif platform == 'music':
             return await download_music(url=url, message=message)
         else:
@@ -520,7 +576,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✨ <b>Я умею скачивать:</b>
 • 📸 <b>Instagram</b> - фото, видео, Reels
 • 🎵 <b>TikTok</b> - видео без водяного знака
-• ▶️ <b>YouTube</b> - видео в хорошем качестве
+• ▶️ <b>YouTube</b> - видео (включая Shorts)
 • 🎶 <b>Музыку</b> - по ссылке или названию
 
 🎯 <b>Просто отправьте ссылку!</b>
@@ -535,17 +591,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Поддерживаемые ссылки:</b>
 • Instagram: instagram.com/p/... или /reel/...
 • TikTok: tiktok.com/@user/video/...
-• YouTube: youtu.be/...
+• YouTube: youtu.be/... (включая /shorts/)
 • Музыка: песня Imagine Dragons
 
 <b>Примеры:</b>
 <code>https://www.instagram.com/p/Cxample123/</code>
 <code>https://youtu.be/dQw4w9WgXcQ</code>
+<code>https://youtube.com/shorts/xxxxx</code>
 <code>песня Billie Eilish bad guy</code>
 
 ⚠️ <b>Примечание:</b>
 • При ошибке YouTube подождите 5-10 минут
 • Instagram требует авторизации аккаунта
+• YouTube Shorts обрабатываются отдельно
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -558,12 +616,12 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 6.2</i>
+<i>Версия 6.5</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
 • TikTok (видео без водяного знака)
-• YouTube (видео)
+• YouTube (видео, Shorts)
 • Музыка (поиск)
 
 <i>Работает 24/7 в облаке Render!</i>
@@ -593,6 +651,7 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>⚠️ YouTube не работает?</b>
 • YouTube блокирует ботов. Подождите 5-10 минут
 • Попробуйте другое видео
+• Shorts обрабатываются отдельно
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -606,7 +665,7 @@ async def platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 • 📸 Instagram - посты, Reels, карусели
 • 🎵 TikTok - видео без водяного знака
-• ▶️ YouTube - видео
+• ▶️ YouTube - видео, Shorts
 • 🎶 Музыка - Spotify, поиск
 
 <i>Просто отправьте ссылку - я всё сделаю!</i>
@@ -698,7 +757,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Отправьте ссылку на:\n"
             "• 📸 Instagram (instagram.com/p/... или /reel/...)\n"
             "• 🎵 TikTok (tiktok.com/@.../video/...)\n"
-            "• ▶️ YouTube (youtu.be/...)\n"
+            "• ▶️ YouTube (youtu.be/... или /shorts/...)\n"
             "• 🎶 Музыку (название песни)\n\n"
             "Используйте /help для инструкции",
             parse_mode='HTML'
@@ -882,13 +941,13 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ЗАПУСК БОТА ==========
 
 def run_bot():
-    """Запускает Telegram бота с повторными попытками и принудительным удалением вебхука"""
+    """Запускает Telegram бота с повторными попытками"""
     import time
     import requests
     
     logger.info("🤖 Инициализация Telegram бота...")
     
-    # ПРИНУДИТЕЛЬНО УДАЛЯЕМ ВЕБХУК ПЕРЕД ЗАПУСКОМ (РЕШАЕТ ОШИБКУ 409)
+    # ПРИНУДИТЕЛЬНО УДАЛЯЕМ ВЕБХУК ПЕРЕД ЗАПУСКОМ
     try:
         webhook_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
         response = requests.get(webhook_url)
