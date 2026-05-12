@@ -51,66 +51,23 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} ГБ"
 
-# ========== INSTAGRAM ==========
-async def download_instagram(url, message=None):
-    """Скачивание Instagram через yt-dlp"""
-    try:
-        shortcode_match = re.search(r'(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
-        if not shortcode_match:
-            return None, "Не удалось определить пост"
-        
-        if message:
-            await message.edit_text(f"📸 Скачиваю Instagram пост...")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'instagram_%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best',
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extract_flat': False,
-            'retries': 10,
-            'ignoreerrors': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                for ext in ['.mp4', '.webm', '.mkv', '.jpg', '.png']:
-                    test_path = filename.rsplit('.', 1)[0] + ext
-                    if os.path.exists(test_path):
-                        filename = test_path
-                        break
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                file_type = 'video' if filename.endswith(('.mp4', '.webm', '.mkv')) else 'photo'
-                return [{'path': filename, 'type': file_type, 'size': os.path.getsize(filename)}], 'single'
-        
-        return None, "Не удалось скачать. Убедитесь, что пост публичный."
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Instagram ошибка: {error_msg}")
-        return None, f"Ошибка: {error_msg[:150]}"
-
-# ========== YOUTUBE ==========
+# ========== YOUTUBE (рабочая версия) ==========
 async def download_youtube(url, message=None):
-    """Скачивание YouTube видео"""
+    """Скачивание YouTube видео (рабочая версия)"""
     try:
         if message:
-            await message.edit_text("📥 Скачиваю YouTube видео...")
+            await message.edit_text("📥 Подготавливаю скачивание YouTube...")
         
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'best[height<=720]',
             'merge_output_format': 'mp4',
             'retries': 10,
             'fragment_retries': 10,
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extract_flat': False,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -154,7 +111,8 @@ async def download_tiktok(url, message=None):
             'format': 'best',
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'extract_flat': False,
-            'retries': 10,
+            'retries': 5,
+            'fragment_retries': 5,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -176,11 +134,15 @@ async def download_tiktok(url, message=None):
     except Exception as e:
         error_msg = str(e)
         logger.error(f"TikTok ошибка: {error_msg}")
-        return None, f"Ошибка: {error_msg[:150]}"
+        
+        if "blocked" in error_msg.lower():
+            return None, "⚠️ TikTok временно блокирует запросы. Попробуйте через 5-10 минут"
+        else:
+            return None, f"Ошибка: {error_msg[:150]}"
 
-# ========== МУЗЫКА (улучшенная) ==========
+# ========== ПОИСК МУЗЫКИ (улучшенный) ==========
 async def search_and_download_music(query, message=None):
-    """Поиск и скачивание музыки по названию через YouTube"""
+    """Поиск и скачивание музыки по названию"""
     try:
         if message:
             await message.edit_text(f"🔍 Ищу музыку: {query}...")
@@ -195,7 +157,7 @@ async def search_and_download_music(query, message=None):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'retries': 10,
+            'retries': 5,
             'default_search': 'ytsearch',
         }
         
@@ -216,76 +178,18 @@ async def search_and_download_music(query, message=None):
         logger.error(f"Music ошибка: {e}")
         return None, f"Ошибка: {str(e)[:150]}"
 
-async def download_music_from_url(url, message=None):
-    """Скачивание музыки по ссылке (SoundCloud, Spotify) с улучшенной обработкой"""
-    try:
-        if message:
-            await message.edit_text("🎵 Скачиваю музыку по ссылке...")
-        
-        # Пробуем разные подходы для SoundCloud
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'music_%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'retries': 10,
-            'extract_flat': False,
-            'ignoreerrors': True,
-            'no_check_certificate': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
-            except Exception as e:
-                # Если не удалось скачать напрямую, пробуем поискать трек по названию
-                if "soundcloud" in url.lower():
-                    # Извлекаем название из URL
-                    url_parts = url.split('/')
-                    track_name = url_parts[-1].split('?')[0].replace('-', ' ')
-                    await message.edit_text(f"🔍 Ищу '{track_name}' на YouTube...")
-                    return await search_and_download_music(track_name, message)
-                else:
-                    raise e
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'audio', 'size': os.path.getsize(filename)}], 'single'
-        
-        return None, "Не удалось скачать музыку"
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Music URL ошибка: {error_msg}")
-        
-        if "404" in error_msg:
-            # Если ссылка недоступна, пробуем поискать по названию
-            return None, "🔗 Ссылка недоступна. Попробуйте найти музыку по названию командой: песня Название"
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
-
 # ========== ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ ==========
 def detect_platform(url):
     url_lower = url.lower()
     
-    if 'instagram.com' in url_lower and ('/p/' in url_lower or '/reel/' in url_lower or '/tv/' in url_lower):
-        return 'instagram', '📸 Instagram'
-    elif 'tiktok.com' in url_lower:
+    if 'tiktok.com' in url_lower:
         return 'tiktok', '🎵 TikTok'
     elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
         return 'youtube', '▶️ YouTube'
-    elif 'soundcloud.com' in url_lower or 'spotify.com' in url_lower:
-        return 'music_url', '🎶 Музыка по ссылке'
     else:
         return 'unknown', '❓ Неизвестно'
 
-# ========== КЛАВИАТУРЫ ==========
+# ========== КЛАВИАТУРЫ (ОБНОВЛЕННЫЙ ДИЗАЙН) ==========
 def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton("📖 Инструкция", callback_data="help"),
@@ -300,7 +204,7 @@ def get_back_keyboard():
     keyboard = [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
     return InlineKeyboardMarkup(keyboard)
 
-# ========== КОМАНДЫ БОТА ==========
+# ========== КОМАНДЫ БОТА (ОБНОВЛЕННЫЙ ДИЗАЙН) ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -313,10 +217,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ╚══════════════════════════════════════════════╝
 
 ✨ <b>Что умеет бот:</b>
-• 📸 <b>Instagram</b> - публичные фото, видео, Reels
 • ▶️ <b>YouTube</b> - видео (включая Shorts)
 • 🎵 <b>TikTok</b> - видео без водяного знака
-• 🎶 <b>Музыка</b> - поиск по названию или ссылка (SoundCloud, Spotify)
+• 🎶 <b>Музыка</b> - поиск по названию
+
+⚙️ <b>В разработке:</b>
+• 📸 Instagram - скоро будет доступен
 
 🎯 <b>Просто отправьте ссылку или напишите "песня Название"</b>
 
@@ -330,9 +236,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>🟢 Поддерживаемые платформы:</b>
 
-• <b>Instagram</b> - публичные посты, Reels
-  Пример: <code>https://www.instagram.com/p/xxxxx/</code>
-
 • <b>YouTube</b> - любые видео
   Пример: <code>https://youtu.be/dQw4w9WgXcQ</code>
 
@@ -342,12 +245,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • <b>Музыка по названию</b>
   Пример: <code>песня Imagine Dragons Believer</code>
 
-• <b>Музыка по ссылке</b> - SoundCloud/Spotify
-  Пример: <code>https://soundcloud.com/artist/track</code>
+⚙️ <b>Временно недоступно:</b>
+• Instagram - в разработке
 
 ⚠️ <b>Важно:</b>
-• Instagram работает ТОЛЬКО с публичными аккаунтами
-• Если ссылка SoundCloud недоступна - используйте поиск по названию
+• При ошибке YouTube подождите 5-10 минут
+• TikTok иногда блокирует - попробуйте позже
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -358,17 +261,16 @@ async def platforms_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     platforms_text = """
 📱 <b>ПОДДЕРЖИВАЕМЫЕ ПЛАТФОРМЫ</b>
 
-✅ <b>Работают:</b>
-• 📸 <b>Instagram</b> - публичные фото, видео, Reels
+✅ <b>Работают сейчас:</b>
 • ▶️ <b>YouTube</b> - все видео, включая Shorts
 • 🎵 <b>TikTok</b> - видео без водяного знака
 • 🎶 <b>Музыка</b> - поиск по названию (YouTube Music)
-• 🎵 <b>SoundCloud</b> - прямая ссылка (может требовать авторизацию)
-• 🎧 <b>Spotify</b> - прямая ссылка (трек)
 
-💡 <b>Совет:</b>
-Если SoundCloud не скачивается - используйте поиск по названию:
-<code>песня Название трека</code>
+⚙️ <b>В разработке:</b>
+• 📸 <b>Instagram</b> - скоро добавим
+
+💡 <b>Как скачать музыку:</b>
+Напишите: <code>песня Название песни</code>
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -379,21 +281,23 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     faq_text = """
 ❓ <b>FAQ - ЧАСТЫЕ ВОПРОСЫ</b>
 
-<b>❌ SoundCloud не скачивается?</b>
-• Некоторые треки могут быть закрыты
-• Используйте поиск по названию: <code>песня Название</code>
-
 <b>🎵 Как скачать музыку по названию?</b>
 Напишите: <code>песня Название песни</code>
 
-<b>❌ Почему не скачивается Instagram?</b>
-• Убедитесь, что аккаунт публичный
+<b>⏳ Почему долго скачивается?</b>
+Зависит от размера файла и скорости интернета
 
-<b>💰 Бесплатно?</b>
+<b>⚠️ TikTok выдаёт ошибку?</b>
+TikTok иногда блокирует запросы. Подождите 5-10 минут
+
+<b>💰 Это бесплатно?</b>
 Да, бот полностью бесплатный!
 
 <b>🐛 Нашёл ошибку?</b>
 Свяжитесь: @barbosick89
+
+<b>📸 А где Instagram?</b>
+В разработке, скоро добавим!
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -404,21 +308,17 @@ async def music_search_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     music_text = """
 🎵 <b>ПОИСК МУЗЫКИ</b>
 
-<b>Способы скачать музыку:</b>
+<b>Как скачать музыку:</b>
 
-1️⃣ <b>По названию (РЕКОМЕНДУЮ):</b>
-   Напишите: <code>песня Название</code>
-   Пример: <code>песня Billie Eilish bad guy</code>
+Напишите: <code>песня Название</code>
 
-2️⃣ <b>По ссылке:</b>
-   Отправьте ссылку на трек:
-   • SoundCloud (может не работать)
-   • Spotify
+<b>Примеры:</b>
+<code>песня Billie Eilish bad guy</code>
+<code>песня Imagine Dragons Believer</code>
 
-💡 <b>Совет:</b>
-Если SoundCloud не работает - используйте поиск по названию!
+📌 <b>Поддерживаемые форматы:</b> MP3 (192 kbps)
 
-📌 <b>Формат:</b> MP3 (192 kbps)
+💡 <b>Совет:</b> Чем точнее название, тем лучше результат
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -435,6 +335,7 @@ async def contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 <b>Обращаться по любым вопросам:</b>
 • Ошибки в работе бота
 • Предложения по улучшению
+• Новые идеи для функционала
 
 🌟 <b>Спасибо, что пользуетесь ботом!</b>
 """
@@ -498,10 +399,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ <b>Неверная ссылка!</b>\n\n"
             "Поддерживаются:\n"
-            "• 📸 Instagram (instagram.com/p/... или /reel/...)\n"
             "• ▶️ YouTube (youtu.be/... или youtube.com/...)\n"
             "• 🎵 TikTok (tiktok.com/@.../video/...)\n"
             "• 🎶 Музыка: напишите 'песня Название'\n\n"
+            "📸 Instagram скоро добавим!\n\n"
             "Используйте /help для инструкции",
             parse_mode='HTML'
         )
@@ -513,14 +414,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     
-    if platform == 'instagram':
-        files, _ = await download_instagram(text, status_msg)
-    elif platform == 'youtube':
+    if platform == 'youtube':
         files, _ = await download_youtube(text, status_msg)
     elif platform == 'tiktok':
         files, _ = await download_tiktok(text, status_msg)
-    elif platform == 'music_url':
-        files, _ = await download_music_from_url(text, status_msg)
     else:
         files = None
     
@@ -540,8 +437,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(file['path'], 'rb') as f:
                 if file['type'] == 'video':
                     await update.message.reply_video(video=f, caption=f"🎬 Скачано с {platform_name}", supports_streaming=True)
-                elif file['type'] == 'photo':
-                    await update.message.reply_photo(photo=f, caption=f"📸 Скачано с {platform_name}")
                 else:
                     await update.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
             
@@ -558,8 +453,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ <b>Не удалось скачать</b>\n\n"
             f"📱 Платформа: {platform_name}\n"
             f"🔍 Ошибка: {error_msg[:200]}\n\n"
-            f"💡 Совет: Для SoundCloud используйте поиск по названию\n"
-            f"📞 Свяжитесь с поддержкой: @barbosick89",
+            f"💡 Если ошибка повторяется, свяжитесь с поддержкой:\n"
+            f"📞 @barbosick89",
             parse_mode='HTML'
         )
 
