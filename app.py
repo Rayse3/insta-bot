@@ -129,6 +129,7 @@ def get_instaloader(with_login=False):
                 logger.warning(f"⚠️ Не удалось удалить {session_file}: {e}")
     # ===========================================
     
+    # Убираем неподдерживаемые параметры sleep_requests и sleep_between_downloads
     loader = instaloader.Instaloader(
         download_videos=True,
         download_pictures=True,
@@ -137,9 +138,7 @@ def get_instaloader(with_login=False):
         filename_pattern="{shortcode}_{date_utc}_UTC",
         dirname_pattern=DOWNLOAD_DIR,
         max_connection_attempts=5,
-        request_timeout=60,
-        sleep_requests=1.0,  # Задержка между запросами
-        sleep_between_downloads=1.0  # Задержка между скачиваниями
+        request_timeout=60
     )
     
     if with_login and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
@@ -286,7 +285,7 @@ async def download_youtube(url, message=None):
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best[height<=720]',  # Ограничиваем размер
+            'format': 'best[height<=720]',
             'merge_output_format': 'mp4',
             'retries': 10,
             'fragment_retries': 10,
@@ -303,7 +302,6 @@ async def download_youtube(url, message=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Проверяем существование файла
             if not os.path.exists(filename):
                 for ext in ['.mp4', '.webm', '.mkv']:
                     test_path = filename.rsplit('.', 1)[0] + ext
@@ -339,7 +337,7 @@ async def download_youtube_shorts(url, message=None):
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'shorts_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best[height<=480]',  # Для Shorts достаточно 480p
+            'format': 'best[height<=480]',
             'merge_output_format': 'mp4',
             'retries': 5,
             'fragment_retries': 5,
@@ -416,13 +414,6 @@ async def download_music(url=None, query=None, message=None):
     try:
         from yt_dlp import YoutubeDL
         
-        async def update_progress(d):
-            if d['status'] == 'downloading' and message:
-                if 'total_bytes' in d:
-                    percent = d['downloaded_bytes'] / d['total_bytes'] * 100
-                    if percent % 10 < 1:  # Обновляем только каждые ~10%
-                        await message.edit_text(f"🎵 Скачиваю... {percent:.0f}%")
-        
         if query:
             search_query = f"ytsearch:{query}"
             ydl_opts = {
@@ -497,7 +488,6 @@ async def process_download(url, platform, message):
         elif platform == 'tiktok':
             return await download_tiktok(url, message)
         elif platform == 'youtube':
-            # Проверяем, является ли ссылка Shorts
             if 'shorts' in url.lower():
                 return await download_youtube_shorts(url, message)
             else:
@@ -589,7 +579,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⚠️ <b>Примечание:</b>
 • При ошибке YouTube подождите 5-10 минут
 • Instagram требует авторизации аккаунта
-• YouTube Shorts обрабатываются отдельно
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -636,7 +625,6 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>⚠️ YouTube не работает?</b>
 • YouTube блокирует ботов. Подождите 5-10 минут
-• Попробуйте другое видео
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -763,7 +751,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_downloads[chat_id] = {'files': files, 'platform': platform_name}
         
         if len(files) > 1:
-            # Карусель - предлагаем выбор
             await status_msg.edit_text(
                 f"📦 <b>Найдено {len(files)} файлов!</b>\n\n"
                 f"Выберите, что хотите скачать:",
@@ -771,7 +758,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=create_choice_keyboard(files)
             )
         else:
-            # Один файл
             file = files[0]
             file_size_mb = file['size'] / (1024 * 1024)
             
@@ -830,8 +816,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💡 Возможные причины:\n"
             f"• Пост приватный\n"
             f"• Неверная ссылка\n"
-            f"• Контент удален\n"
-            f"• YouTube: может блокировать запросы, подождите",
+            f"• Контент удален",
             parse_mode='HTML'
         )
 
