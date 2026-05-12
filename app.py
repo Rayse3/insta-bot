@@ -147,7 +147,6 @@ def get_instaloader(with_login=False):
             logger.warning(f"⚠️ Не удалось авторизоваться: {e}")
     
     return loader
-
 async def download_instagram_post(url, message=None):
     """Скачивание контента из Instagram с подробным логированием"""
     try:
