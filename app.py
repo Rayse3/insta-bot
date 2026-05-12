@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 
+BOT_VERSION = "2.5"
+BOT_NAME = "SELG"
+
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не задан!")
     sys.exit(1)
@@ -51,51 +54,12 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} ГБ"
 
-# ========== YOUTUBE ==========
+# ========== YOUTUBE (В РАЗРАБОТКЕ) ==========
 async def download_youtube(url, message=None):
-    """Скачивание YouTube видео"""
-    try:
-        if message:
-            await message.edit_text("📥 Подготавливаю скачивание YouTube...")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best[height<=720]',
-            'merge_output_format': 'mp4',
-            'retries': 10,
-            'fragment_retries': 10,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extract_flat': False,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                for ext in ['.mp4', '.webm', '.mkv']:
-                    test_path = filename.rsplit('.', 1)[0] + ext
-                    if os.path.exists(test_path):
-                        filename = test_path
-                        break
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
-                
-        return None, "Не удалось скачать видео"
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"YouTube ошибка: {error_msg}")
-        
-        if "Sign in to confirm" in error_msg:
-            return None, "⚠️ YouTube требует подтверждения. Подождите 5-10 минут"
-        elif "HTTP Error 429" in error_msg:
-            return None, "⚠️ Слишком много запросов. Подождите 10-15 минут"
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
+    """Скачивание YouTube видео - временно недоступно"""
+    if message:
+        await message.edit_text("⚙️ **YouTube временно в разработке**\n\nСкоро функция будет восстановлена!\n\n✅ Доступно сейчас:\n• TikTok\n• Музыка по названию\n• Музыка по ссылке", parse_mode='Markdown')
+    return None, "YouTube временно недоступен"
 
 # ========== TIKTOK ==========
 async def download_tiktok(url, message=None):
@@ -178,7 +142,7 @@ async def search_and_download_music(query, message=None):
         logger.error(f"Music ошибка: {e}")
         return None, f"Ошибка: {str(e)[:150]}"
 
-# ========== МУЗЫКА ПО ССЫЛКЕ (как в старом коде) ==========
+# ========== МУЗЫКА ПО ССЫЛКЕ ==========
 async def download_music_from_url(url, message=None):
     """Скачивание музыки по ссылке (SoundCloud, Spotify)"""
     try:
@@ -237,7 +201,8 @@ def get_main_keyboard():
          InlineKeyboardButton("❓ FAQ", callback_data="faq")],
         [InlineKeyboardButton("📱 Поддерживаемые платформы", callback_data="platforms"),
          InlineKeyboardButton("🎵 Поиск музыки", callback_data="music")],
-        [InlineKeyboardButton("📞 Контакты", callback_data="contacts")]
+        [InlineKeyboardButton("📞 Контакты", callback_data="contacts"),
+         InlineKeyboardButton("👤 О боте", callback_data="about")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -253,29 +218,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🌟 <b>ДОБРО ПОЖАЛОВАТЬ, {user.first_name}!</b>
 
 ╔══════════════════════════════════════════════╗
-║  🚀 <b>Universal Media Downloader Bot</b>       ║
+║  🚀 <b>{BOT_NAME} - Universal Downloader Bot</b>  ║
 ║     <i>Ваш универсальный загрузчик контента</i>  ║
 ╚══════════════════════════════════════════════╝
 
 ✨ <b>Что умеет бот:</b>
-• ▶️ <b>YouTube</b> - видео (включая Shorts)
 • 🎵 <b>TikTok</b> - видео без водяного знака
 • 🎶 <b>Музыка</b> - поиск по названию или по ссылке (SoundCloud, Spotify)
 
-🎯 <b>Просто отправьте ссылку или напишите "песня Название"</b>
+⚙️ <b>В разработке:</b>
+• ▶️ YouTube - скоро будет доступен
 
-📞 <b>Контакты для связи:</b> @barbosick89
+🎯 <b>Просто отправьте ссылку TikTok или напишите "песня Название"</b>
+
+📞 <b>Контакты:</b> @barbosick89
 """
     await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=get_main_keyboard())
 
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    about_text = f"""
+👤 <b>О БОТЕ</b>
+
+<b>Название:</b> {BOT_NAME}
+<b>Версия:</b> {BOT_VERSION}
+<b>Разработчик:</b> @barbosick89
+
+✨ <b>Возможности:</b>
+• 🎵 TikTok (работает)
+• 🎶 Музыка по названию (работает)
+• 🎧 SoundCloud/Spotify (работает)
+• ▶️ YouTube (в разработке)
+
+📡 <b>Хостинг:</b> Render
+🌍 <b>Статус:</b> 24/7
+💡 <b>Бесплатный бот</b> для скачивания контента
+
+🐛 <b>Нашли баг?</b> Свяжитесь: @barbosick89
+"""
+    if update.callback_query:
+        await update.callback_query.message.edit_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
+    else:
+        await update.message.reply_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
+    help_text = f"""
 📖 <b>ИНСТРУКЦИЯ</b>
 
-<b>🟢 Поддерживаемые платформы:</b>
-
-• <b>YouTube</b> - любые видео
-  Пример: <code>https://youtu.be/dQw4w9WgXcQ</code>
+<b>🟢 Работает сейчас:</b>
 
 • <b>TikTok</b> - видео
   Пример: <code>https://www.tiktok.com/@user/video/123</code>
@@ -286,9 +275,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • <b>Музыка по ссылке</b> - SoundCloud/Spotify
   Пример: <code>https://soundcloud.com/artist/track</code>
 
+⚙️ <b>В разработке:</b>
+• <b>YouTube</b> - временно недоступен
+
 ⚠️ <b>Важно:</b>
-• При ошибке YouTube подождите 5-10 минут
 • TikTok иногда блокирует - попробуйте позже
+• Для музыки пишите "песня Название"
+
+📞 <b>Контакты:</b> @barbosick89
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -296,18 +290,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def platforms_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    platforms_text = """
+    platforms_text = f"""
 📱 <b>ПОДДЕРЖИВАЕМЫЕ ПЛАТФОРМЫ</b>
 
-✅ <b>Работают:</b>
-• ▶️ <b>YouTube</b> - все видео, включая Shorts
+✅ <b>Работают сейчас:</b>
 • 🎵 <b>TikTok</b> - видео без водяного знака
 • 🎶 <b>Музыка</b> - поиск по названию (YouTube Music)
 • 🎵 <b>SoundCloud</b> - прямая ссылка
 • 🎧 <b>Spotify</b> - прямая ссылка (трек)
 
+⚙️ <b>В разработке:</b>
+• ▶️ <b>YouTube</b> - скоро добавим
+• 📸 <b>Instagram</b> - в планах
+
 💡 <b>Как скачать музыку:</b>
 Напишите: <code>песня Название песни</code>
+
+📞 <b>Контакты:</b> @barbosick89
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -315,7 +314,7 @@ async def platforms_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    faq_text = """
+    faq_text = f"""
 ❓ <b>FAQ - ЧАСТЫЕ ВОПРОСЫ</b>
 
 <b>🎵 Как скачать музыку по названию?</b>
@@ -335,6 +334,8 @@ TikTok иногда блокирует запросы. Подождите 5-10 �
 
 <b>🐛 Нашёл ошибку?</b>
 Свяжитесь: @barbosick89
+
+<b>📌 Версия бота:</b> {BOT_NAME} v{BOT_VERSION}
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -366,7 +367,7 @@ async def music_search_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
 
 async def contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contacts_text = """
+    contacts_text = f"""
 📞 <b>КОНТАКТНАЯ ИНФОРМАЦИЯ</b>
 
 🐛 <b>По вопросам и багам:</b>
@@ -375,9 +376,12 @@ async def contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 <b>Обращаться по любым вопросам:</b>
 • Ошибки в работе бота
 • Предложения по улучшению
+• Новые идеи для функционала
 
 ⏰ <b>Время ответа:</b>
 Обычно в течение 24 часов
+
+📌 <b>{BOT_NAME} v{BOT_VERSION}</b>
 
 🌟 <b>Спасибо, что пользуетесь ботом!</b>
 """
@@ -390,7 +394,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.message.edit_text(
-        "🎯 <b>ГЛАВНОЕ МЕНЮ</b>\n\nПросто отправьте ссылку или напишите 'песня Название'!",
+        f"🎯 <b>ГЛАВНОЕ МЕНЮ</b>\n\nПросто отправьте ссылку TikTok или напишите 'песня Название'!\n\n{BOT_NAME} v{BOT_VERSION}",
         parse_mode='HTML',
         reply_markup=get_main_keyboard()
     )
@@ -420,7 +424,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_audio(
                     audio=f,
                     title=os.path.basename(files[0]['path']).replace('.mp3', ''),
-                    performer="Universal Bot"
+                    performer=f"{BOT_NAME} Bot"
                 )
             os.remove(files[0]['path'])
             await status_msg.delete()
@@ -440,13 +444,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if platform == 'unknown':
         await update.message.reply_text(
-            "❌ <b>Неверная ссылка!</b>\n\n"
-            "Поддерживаются:\n"
-            "• ▶️ YouTube (youtu.be/... или youtube.com/...)\n"
-            "• 🎵 TikTok (tiktok.com/@.../video/...)\n"
-            "• 🎶 Музыка: напишите 'песня Название'\n"
-            "• 🎵 SoundCloud/Spotify ссылки\n\n"
-            "Используйте /help для инструкции",
+            f"❌ <b>Неверная ссылка!</b>\n\n"
+            f"Поддерживаются:\n"
+            f"• 🎵 TikTok (tiktok.com/@.../video/...)\n"
+            f"• 🎶 Музыка: напишите 'песня Название'\n"
+            f"• 🎵 SoundCloud/Spotify ссылки\n\n"
+            f"⚙️ YouTube временно в разработке\n\n"
+            f"Используйте /help для инструкции\n\n"
+            f"📌 {BOT_NAME} v{BOT_VERSION}",
             parse_mode='HTML'
         )
         return
@@ -499,7 +504,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📱 Платформа: {platform_name}\n"
             f"🔍 Ошибка: {error_msg[:200]}\n\n"
             f"💡 Если ошибка повторяется, свяжитесь с поддержкой:\n"
-            f"📞 @barbosick89",
+            f"📞 @barbosick89\n\n"
+            f"📌 {BOT_NAME} v{BOT_VERSION}",
             parse_mode='HTML'
         )
 
@@ -517,6 +523,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await music_search_info(update, context)
     elif query.data == "contacts":
         await contacts(update, context)
+    elif query.data == "about":
+        await about_command(update, context)
     elif query.data == "main_menu":
         await main_menu(update, context)
     
@@ -526,14 +534,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"❌ Ошибка: {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "⚠️ Произошла ошибка.\n\n"
-            "Пожалуйста, попробуйте позже или свяжитесь с поддержкой:\n"
-            "📞 @barbosick89"
+            f"⚠️ Произошла ошибка.\n\n"
+            f"Пожалуйста, попробуйте позже или свяжитесь с поддержкой:\n"
+            f"📞 @barbosick89\n\n"
+            f"📌 {BOT_NAME} v{BOT_VERSION}"
         )
 
 # ========== ЗАПУСК БОТА ==========
 def run_bot():
-    logger.info("🤖 Запуск Telegram бота...")
+    logger.info(f"🤖 Запуск {BOT_NAME} v{BOT_VERSION}...")
     
     try:
         application = Application.builder().token(BOT_TOKEN).build()
@@ -552,7 +561,7 @@ def run_bot():
 
 # ========== ГЛАВНЫЙ ЗАПУСК ==========
 if __name__ == "__main__":
-    logger.info("🚀 ЗАПУСК БОТА НА RENDER")
+    logger.info(f"🚀 ЗАПУСК {BOT_NAME} v{BOT_VERSION} НА RENDER")
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
