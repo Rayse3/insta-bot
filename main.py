@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SECRET_KEY = os.environ.get("SECRET_KEY", "selg-secret-key-2024")
-BOT_VERSION = "3.0"
+BOT_VERSION = "3.1"
 BOT_NAME = "SELG"
 
 # Настройки
@@ -41,7 +41,6 @@ ALLOWED_DOMAINS = [
     "instagram.com", "www.instagram.com",
     "twitter.com", "www.twitter.com", "x.com", "www.x.com",
 ]
-JS_RUNTIME = {"node": {"path": "node"}}
 
 # Создаем папку для скачиваний
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -140,14 +139,16 @@ def make_progress_hook(message, msg) -> Callable:
                 return
             
             downloaded_bytes = d.get("downloaded_bytes", 0)
+            total_bytes = d.get("total_bytes", 1)
+            
             if downloaded_bytes > MAX_FILESIZE:
                 raise DownloadCancelled("File too large")
             
-            perc = round(d["downloaded_bytes"] * 100 / d["total_bytes"])
+            perc = round(downloaded_bytes * 100 / total_bytes)
             bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=msg.message_id,
-                text=f"📥 Скачивание: {d.get('info_dict', {}).get('title', 'файла')[:50]}...\n\n{perc}%\n\n<i>SELG Bot v{BOT_VERSION}</i>",
+                text=f"📥 Скачивание: {d.get('info_dict', {}).get('title', 'файла')[:40]}...\n\n{perc}%\n\nSELG Bot v{BOT_VERSION}",
                 parse_mode="HTML",
             )
             last_edited[f"{message.chat.id}-{msg.message_id}"] = datetime.datetime.now()
@@ -159,14 +160,32 @@ def make_progress_hook(message, msg) -> Callable:
 
 # ========== ОТПРАВКА МЕДИА ==========
 def send_media(message, info: Any, audio: bool = False) -> None:
-    downloads = info.get("requested_downloads") or None
-    if not downloads:
-        if info.get("entries") is not None and len(info.get("entries")) > 0:
-            downloads = info.get("entries")[0].get("requested_downloads") or None
-    if not downloads or len(downloads) == 0:
-        raise Exception("No requested downloads found")
+    # Пробуем получить файл из разных мест
+    filepath = None
     
-    filepath = downloads[0]["filepath"]
+    # Способ 1: requested_downloads
+    downloads = info.get("requested_downloads")
+    if downloads and len(downloads) > 0:
+        filepath = downloads[0].get("filepath")
+    
+    # Способ 2: entries
+    if not filepath and info.get("entries"):
+        entries = info.get("entries")
+        if entries and len(entries) > 0:
+            downloads = entries[0].get("requested_downloads")
+            if downloads and len(downloads) > 0:
+                filepath = downloads[0].get("filepath")
+    
+    # Способ 3: ищем в папке
+    if not filepath:
+        for file in os.listdir(OUTPUT_FOLDER):
+            if file.endswith(('.mp4', '.webm', '.mp3')):
+                filepath = os.path.join(OUTPUT_FOLDER, file)
+                break
+    
+    if not filepath or not os.path.exists(filepath):
+        raise Exception("Не найден скачанный файл")
+    
     file_size = os.path.getsize(filepath)
     
     with open(filepath, "rb") as f:
@@ -175,18 +194,25 @@ def send_media(message, info: Any, audio: bool = False) -> None:
         else:
             bot.send_video(
                 message.chat.id, f, reply_to_message_id=message.message_id,
-                width=downloads[0].get("width", 0), height=downloads[0].get("height", 0),
-                caption=f"🎬 Скачано с помощью {BOT_NAME} Bot"
+                caption=f"Скачано с помощью {BOT_NAME} Bot"
             )
     
     os.remove(filepath)
     logger.info(f"Файл отправлен и удален: {filepath} ({format_size(file_size)})")
 
 # ========== ОЧИСТКА ==========
-def cleanup_file(video_title: int) -> None:
-    for file in os.listdir(OUTPUT_FOLDER):
-        if file.startswith(str(video_title)):
-            os.remove(os.path.join(OUTPUT_FOLDER, file))
+def cleanup_old_files():
+    """Удаляет старые файлы из папки"""
+    try:
+        now = time.time()
+        for file in os.listdir(OUTPUT_FOLDER):
+            file_path = os.path.join(OUTPUT_FOLDER, file)
+            if os.path.isfile(file_path):
+                if now - os.path.getmtime(file_path) > 3600:  # 1 час
+                    os.remove(file_path)
+                    logger.info(f"Удален старый файл: {file}")
+    except Exception as e:
+        logger.error(f"Ошибка очистки: {e}")
 
 # ========== ОСНОВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ ==========
 def download_media(message, content, audio=False, format_id=None) -> None:
@@ -207,22 +233,21 @@ def download_media(message, content, audio=False, format_id=None) -> None:
             bot.reply_to(message, "❌ Неверная ссылка YouTube")
             return
     
-    # Статусное сообщение (ИСПРАВЛЕНО)
+    # Статусное сообщение
     msg = bot.reply_to(message, f"📥 Начинаю скачивание...\n\nSELG Bot v{BOT_VERSION}", parse_mode="HTML")
     video_title = round(time.time() * 1000)
     
-    # Настройки yt-dlp
+    # Настройки yt-dlp с JS runtime
     ydl_opts = {
-        "format": format_id if format_id else "bestvideo+bestaudio/best",
+        "format": format_id if format_id else "best[height<=480]/best",
         "outtmpl": f"{OUTPUT_FOLDER}/{video_title}.%(ext)s",
         "progress_hooks": [make_progress_hook(message, msg)],
         "max_filesize": MAX_FILESIZE,
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}] if audio else [],
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
     }
-    
-    # Добавляем JS runtime для YouTube
-    if JS_RUNTIME:
-        ydl_opts["js_runtimes"] = JS_RUNTIME
     
     # Добавляем cookies если есть
     cookie_file = None
@@ -249,26 +274,26 @@ def download_media(message, content, audio=False, format_id=None) -> None:
             bot.delete_message(message.chat.id, msg.message_id)
             
     except DownloadCancelled:
-        bot.edit_message_text("❌ Файл слишком большой!", message.chat.id, msg.message_id)
+        bot.edit_message_text("❌ Файл слишком большой! Максимум 50 MB.", message.chat.id, msg.message_id)
     except (DownloadError, ExtractorError) as e:
         err = str(e).lower()
         if "sign in" in err or "login required" in err:
-            text = "⚠️ YouTube требует авторизации.\n\n💡 Используйте команду /cookies и отправьте cookies.txt файл из браузера"
+            text = "⚠️ YouTube требует авторизации.\n\nИспользуйте команду /cookies и отправьте cookies.txt файл из браузера"
         elif "rate-limit" in err:
             text = "⚠️ Слишком много запросов. Попробуйте через 10-15 минут"
         else:
-            text = f"❌ Ошибка при скачивании: {str(e)[:100]}"
+            text = f"❌ Ошибка: {str(e)[:100]}"
         bot.edit_message_text(text, message.chat.id, msg.message_id)
     except Exception as e:
         logger.error(f"Download error: {e}")
         bot.edit_message_text(
-            f"❌ Не удалось скачать. Убедитесь, что файл меньше {round(MAX_FILESIZE / 1_000_000)}MB",
+            f"❌ Не удалось скачать. Убедитесь, что файл меньше {MAX_FILESIZE // 1000000}MB",
             message.chat.id, msg.message_id
         )
     finally:
         if cookie_file and os.path.exists(cookie_file):
             os.remove(cookie_file)
-        cleanup_file(video_title)
+        cleanup_old_files()
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
@@ -308,16 +333,16 @@ def start_command(message):
 ╚══════════════════════════════════════════════╝
 
 ✨ <b>Что умеет бот:</b>
-• ▶️ <b>YouTube</b> - видео (включая Shorts)
-• 🎵 <b>TikTok</b> - видео без водяного знака
-• 📸 <b>Instagram</b> - публичные посты и Reels
-• 🐦 <b>Twitter/X</b> - видео
-• 🎶 <b>Музыка</b> - команда /audio <ссылка>
+• ▶️ YouTube - видео
+• 🎵 TikTok - видео
+• 📸 Instagram - публичные
+• 🐦 Twitter/X - видео
+• 🎶 Музыка - команда /audio
 
-🎯 <b>Просто отправьте ссылку или используйте команды:</b>
-• /audio <url> - скачать аудио MP3
-• /custom <url> - выбрать формат
-• /cookies - добавить cookies (для YouTube)
+🎯 <b>Команды:</b>
+• /audio (url) - аудио MP3
+• /custom (url) - выбрать формат
+• /cookies - добавить cookies
 
 📞 <b>Контакты:</b> @barbosick89
 """
@@ -327,7 +352,7 @@ def start_command(message):
 def download_command(message):
     text = message.text.replace("/download", "").strip()
     if not text:
-        bot.reply_to(message, "❌ Используйте: `/download https://youtu.be/...`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Используйте: /download https://youtu.be/...")
         return
     download_media(message, text, audio=False)
 
@@ -335,7 +360,7 @@ def download_command(message):
 def audio_command(message):
     text = message.text.replace("/audio", "").strip()
     if not text:
-        bot.reply_to(message, "❌ Используйте: `/audio https://youtu.be/...`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Используйте: /audio https://youtu.be/...")
         return
     download_media(message, text, audio=True)
 
@@ -343,7 +368,7 @@ def audio_command(message):
 def custom_command(message):
     text = message.text.replace("/custom", "").strip()
     if not text:
-        bot.reply_to(message, "❌ Используйте: `/custom https://youtu.be/...`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Используйте: /custom https://youtu.be/...")
         return
     
     msg = bot.reply_to(message, "🔍 Получаю доступные форматы...")
@@ -372,13 +397,12 @@ def custom_command(message):
 @bot.message_handler(commands=["cookies"])
 def cookies_command(message):
     bot.reply_to(message, 
-        "🍪 **Cookies для YouTube**\n\n"
-        "1. Установите расширение [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)\n"
+        "🍪 Cookies для YouTube\n\n"
+        "1. Установите расширение Get cookies.txt LOCALLY\n"
         "2. Войдите в YouTube в браузере\n"
-        "3. Нажмите на иконку расширения и экспортируйте cookies\n"
-        "4. Отправьте полученный файл с командой /cookies\n\n"
-        "После этого бот сможет обходить блокировки YouTube!",
-        parse_mode="Markdown", disable_web_page_preview=True)
+        "3. Экспортируйте cookies в файл\n"
+        "4. Отправьте файл боту\n\n"
+        "После этого бот сможет обходить блокировки YouTube!")
 
 @bot.message_handler(content_types=["document"])
 def handle_cookie_file(message):
@@ -399,13 +423,13 @@ def handle_cookie_file(message):
             (user_id, encrypted_data)
         )
         db_conn.commit()
-        bot.reply_to(message, "✅ Cookies успешно сохранены! Теперь YouTube будет работать лучше.")
+        bot.reply_to(message, "✅ Cookies успешно сохранены! YouTube будет работать лучше.")
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка при сохранении cookies: {str(e)[:100]}")
+        bot.reply_to(message, f"❌ Ошибка: {str(e)[:100]}")
 
 @bot.message_handler(commands=["id"])
 def get_id(message):
-    bot.reply_to(message, f"Chat ID: `{message.chat.id}`", parse_mode="Markdown")
+    bot.reply_to(message, f"Chat ID: {message.chat.id}")
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def handle_url(message):
@@ -418,133 +442,115 @@ def handle_url(message):
 def callback_handler(call):
     if call.data == "help":
         help_text = f"""
-📖 <b>ИНСТРУКЦИЯ</b>
+📖 ИНСТРУКЦИЯ
 
-<b>🟢 Команды:</b>
-• /download <url> - скачать видео
-• /audio <url> - скачать аудио MP3
-• /custom <url> - выбрать формат
-• /cookies - добавить cookies для YouTube
+Команды:
+• /download url - скачать видео
+• /audio url - скачать аудио MP3
+• /custom url - выбрать формат
+• /cookies - добавить cookies
 
-<b>Поддерживаемые платформы:</b>
-• YouTube, TikTok, Instagram, Twitter/X
-
-⚙️ <b>YouTube не работает?</b>
-Используйте команду /cookies и отправьте cookies файл
+Поддерживаемые платформы:
+YouTube, TikTok, Instagram, Twitter/X
 """
-        bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "faq":
         faq_text = f"""
-❓ <b>FAQ</b>
+❓ FAQ
 
-<b>❌ YouTube не скачивается?</b>
+❌ YouTube не скачивается?
 • Используйте /cookies и отправьте cookies из браузера
-• Подождите 10-15 минут (временная блокировка)
 
-<b>🎵 Как скачать аудио?</b>
+🎵 Как скачать аудио?
 • /audio https://youtu.be/...
 
-<b>💰 Бесплатно?</b>
+💰 Бесплатно?
 • Да, бот полностью бесплатный!
 
-<b>🐛 Нашёл баг?</b>
+🐛 Нашёл баг?
 • @barbosick89
 
-<b>📌 Версия:</b> {BOT_NAME} v{BOT_VERSION}
+Версия: {BOT_NAME} v{BOT_VERSION}
 """
-        bot.edit_message_text(faq_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(faq_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "platforms":
         platforms_text = """
-📱 <b>ПЛАТФОРМЫ</b>
+📱 ПЛАТФОРМЫ
 
-✅ <b>Поддерживаются:</b>
-• ▶️ YouTube (с cookies)
-• 🎵 TikTok
-• 📸 Instagram (публичные)
-• 🐦 Twitter/X
+Поддерживаются:
+• YouTube (с cookies)
+• TikTok
+• Instagram (публичные)
+• Twitter/X
 
-💡 <b>Совет:</b>
-Для YouTube используйте /cookies для обхода блокировок
+Совет: Для YouTube используйте /cookies
 """
-        bot.edit_message_text(platforms_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(platforms_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "music":
         music_text = """
-🎵 <b>МУЗЫКА</b>
+🎵 МУЗЫКА
 
-<b>Как скачать MP3:</b>
-<code>/audio https://youtu.be/...</code>
+Как скачать MP3:
+/audio https://youtu.be/...
 
-Поддерживаются любые видео с YouTube, TikTok, Instagram
-
-📌 Формат: MP3, 192 kbps
+Формат: MP3
 """
-        bot.edit_message_text(music_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(music_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "cookies_info":
         cookies_text = """
-🍪 <b>COOKIES ДЛЯ YOUTUBE</b>
+🍪 COOKIES ДЛЯ YOUTUBE
 
-<b>Зачем нужны?</b>
+Зачем нужны?
 YouTube блокирует скачивание из облака. Cookies решают эту проблему.
 
-<b>Как получить:</b>
-1. Установите расширение "Get cookies.txt LOCALLY"
-2. Войдите в YouTube в браузере
+Как получить:
+1. Установите расширение Get cookies.txt LOCALLY
+2. Войдите в YouTube
 3. Экспортируйте cookies в файл
 4. Отправьте файл боту командой /cookies
 
-<b>Безопасно?</b>
-Cookies хранятся в зашифрованном виде
+Безопасно: Cookies хранятся в зашифрованном виде
 """
-        bot.edit_message_text(cookies_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(cookies_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "contacts":
         contacts_text = f"""
-📞 <b>КОНТАКТЫ</b>
+📞 КОНТАКТЫ
 
-🐛 <b>По вопросам и багам:</b>
-• Telegram: <b>@barbosick89</b>
+🐛 По вопросам и багам:
+• @barbosick89
 
-💡 <b>По любым вопросам:</b>
-• Ошибки в работе
-• Предложения
-
-⏰ <b>Время ответа:</b>
-Обычно в течение 24 часов
-
-📌 <b>{BOT_NAME} v{BOT_VERSION}</b>
+{SELG} v{BOT_VERSION}
 """
-        bot.edit_message_text(contacts_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(contacts_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "about":
         about_text = f"""
-👤 <b>О БОТЕ</b>
+👤 О БОТЕ
 
-<b>Название:</b> {BOT_NAME}
-<b>Версия:</b> {BOT_VERSION}
-<b>Разработчик:</b> @barbosick89
+Название: {BOT_NAME}
+Версия: {BOT_VERSION}
+Разработчик: @barbosick89
 
-✨ <b>Возможности:</b>
-• YouTube (с cookies)
+Возможности:
+• YouTube
 • TikTok
 • Instagram
 • Twitter/X
 
-📡 <b>Хостинг:</b> Render
-🍪 <b>Cookies:</b> зашифрованы
-
-🐛 <b>Нашли баг?</b> @barbosick89
+Хостинг: Render
 """
-        bot.edit_message_text(about_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+        bot.edit_message_text(about_text, call.message.chat.id, call.message.message_id, reply_markup=get_back_keyboard())
     
     elif call.data == "main_menu":
         bot.edit_message_text(
-            "🎯 <b>ГЛАВНОЕ МЕНЮ</b>\n\nОтправьте ссылку или используйте команды!",
+            "🎯 ГЛАВНОЕ МЕНЮ\n\nОтправьте ссылку или используйте команды!",
             call.message.chat.id, call.message.message_id,
-            parse_mode="HTML", reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard()
         )
     
     elif call.data.startswith("format_"):
@@ -556,22 +562,25 @@ Cookies хранятся в зашифрованном виде
 
 # ========== ЗАПУСК БОТА ==========
 def run_bot():
-    logger.info(f"🤖 Запуск {BOT_NAME} v{BOT_VERSION}...")
+    logger.info(f"Запуск {BOT_NAME} v{BOT_VERSION}...")
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка: {e}")
         time.sleep(10)
         run_bot()
 
 # ========== MAIN ==========
 if __name__ == "__main__":
-    logger.info(f"🚀 ЗАПУСК {BOT_NAME} v{BOT_VERSION} НА RENDER")
+    logger.info(f"ЗАПУСК {BOT_NAME} v{BOT_VERSION} НА RENDER")
     
     # Запускаем Flask в потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("✅ Flask сервер запущен")
+    logger.info("Flask сервер запущен")
+    
+    # Очищаем старые файлы
+    cleanup_old_files()
     
     # Запускаем бота
     run_bot()
