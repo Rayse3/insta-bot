@@ -1,40 +1,69 @@
+import base64
+import datetime
+import hashlib
 import os
-import sys
+import re
+import sqlite3
+import time
 import logging
 import threading
-import traceback
-import asyncio
-import re
-import time
-import requests
-import json
-import aiohttp
-from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import yt_dlp
+from typing import Any, Callable
+from urllib.parse import urlparse
 
-# ========== НАСТРОЙКА ==========
+import requests
+import telebot
+import yt_dlp
+from cryptography.fernet import Fernet
+from telebot import types
+from telebot.util import quick_markup
+from yt_dlp.utils import DownloadCancelled, DownloadError, ExtractorError
+from flask import Flask
+
+# ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DOWNLOAD_DIR = "downloads"
-
-BOT_VERSION = "2.5"
+SECRET_KEY = os.environ.get("SECRET_KEY", "selg-secret-key-2024")
+BOT_VERSION = "3.0"
 BOT_NAME = "SELG"
 
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не задан!")
-    sys.exit(1)
+# Настройки
+MAX_FILESIZE = 50000000  # 50 MB
+OUTPUT_FOLDER = "/tmp/selg_downloads"
+ALLOWED_DOMAINS = [
+    "youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com", "youtube-nocookie.com",
+    "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com",
+    "instagram.com", "www.instagram.com",
+    "twitter.com", "www.twitter.com", "x.com", "www.x.com",
+]
+JS_RUNTIME = {"node": {"path": "node"}}  # Для обхода YouTube блокировок
 
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+# Создаем папку для скачиваний
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# ========== FLASK ДЛЯ HEALTH CHECK ==========
+# ========== ШИФРОВАНИЕ COOKIES ==========
+key = hashlib.sha256(SECRET_KEY.encode()).digest()
+cipher = Fernet(base64.urlsafe_b64encode(key))
+
+# ========== БАЗА ДАННЫХ ДЛЯ COOKIES ==========
+script_dir = os.path.dirname(os.path.abspath(__file__))
+db_path = os.path.join(script_dir, "selg_cookies.db")
+db_conn = sqlite3.connect(db_path, check_same_thread=False)
+db_cursor = db_conn.cursor()
+db_cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_cookies (
+        user_id INTEGER PRIMARY KEY,
+        cookie_data TEXT NOT NULL
+    )
+""")
+db_conn.commit()
+
+# ========== FLASK ДЛЯ HEALTH CHECK (RENDER) ==========
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -46,7 +75,17 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app_flask.run(host='0.0.0.0', port=port, threaded=True)
 
+# ========== ИНИЦИАЛИЗАЦИЯ ТЕЛЕГРАМ БОТА ==========
+bot = telebot.TeleBot(BOT_TOKEN)
+last_edited = {}
+
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+def encrypt_cookie(cookie_data: str) -> str:
+    return cipher.encrypt(cookie_data.encode()).decode()
+
+def decrypt_cookie(encrypted_data: str) -> str:
+    return cipher.decrypt(encrypted_data.encode()).decode()
+
 def format_size(size_bytes):
     for unit in ['Б', 'КБ', 'МБ', 'ГБ']:
         if size_bytes < 1024.0:
@@ -54,166 +93,212 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} ГБ"
 
-# ========== YOUTUBE (В РАЗРАБОТКЕ) ==========
-async def download_youtube(url, message=None):
-    """Скачивание YouTube видео - временно недоступно"""
-    if message:
-        await message.edit_text("⚙️ **YouTube временно в разработке**\n\nСкоро функция будет восстановлена!\n\n✅ Доступно сейчас:\n• TikTok\n• Музыка по названию\n• Музыка по ссылке", parse_mode='Markdown')
-    return None, "YouTube временно недоступен"
+def youtube_url_validation(url):
+    youtube_regex = r"(https?://)?(www\.|m\.)?" \
+                    r"(youtube|youtu|youtube-nocookie)\.(com|be)/" \
+                    r"(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})"
+    return re.match(youtube_regex, url)
 
-# ========== TIKTOK ==========
-async def download_tiktok(url, message=None):
-    """Скачивание TikTok видео"""
+def is_allowed_domain(url):
     try:
-        if message:
-            await message.edit_text("🎵 Скачиваю TikTok видео...")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'tiktok_%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'best',
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'extract_flat': False,
-            'retries': 5,
-            'fragment_retries': 5,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                for ext in ['.mp4', '.webm', '.mkv']:
-                    test_path = filename.rsplit('.', 1)[0] + ext
-                    if os.path.exists(test_path):
-                        filename = test_path
-                        break
-            
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
-            
-        return None, "Не удалось скачать TikTok"
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"TikTok ошибка: {error_msg}")
-        
-        if "blocked" in error_msg.lower():
-            return None, "⚠️ TikTok временно блокирует запросы. Попробуйте через 5-10 минут"
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+        if ":" in domain:
+            domain = domain.split(":")[0]
+        return domain in ALLOWED_DOMAINS
+    except (ValueError, AttributeError):
+        return False
 
-# ========== МУЗЫКА ПО НАЗВАНИЮ ==========
-async def search_and_download_music(query, message=None):
-    """Поиск и скачивание музыки по названию"""
-    try:
-        if message:
-            await message.edit_text(f"🔍 Ищу музыку: {query}...")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'music_%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'retries': 5,
-            'default_search': 'ytsearch',
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch:{query}", download=True)
-            
-            if 'entries' in info and len(info['entries']) > 0:
-                video = info['entries'][0]
-                filename = ydl.prepare_filename(video)
-                filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
-                
-                if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                    return [{'path': filename, 'type': 'audio', 'size': os.path.getsize(filename)}], 'single'
-        
-        return None, "Музыка не найдена"
-        
-    except Exception as e:
-        logger.error(f"Music ошибка: {e}")
-        return None, f"Ошибка: {str(e)[:150]}"
+def filter_cookies_by_domain(cookie_data: str) -> str:
+    lines = cookie_data.split("\n")
+    filtered_lines = []
+    for line in lines:
+        if line.startswith("#") or not line.strip():
+            filtered_lines.append(line)
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain = parts[0].lstrip(".")
+        is_allowed = False
+        for allowed_domain in ALLOWED_DOMAINS:
+            if domain == allowed_domain or domain.endswith("." + allowed_domain):
+                is_allowed = True
+                break
+        if is_allowed:
+            filtered_lines.append(line)
+    return "\n".join(filtered_lines)
 
-# ========== МУЗЫКА ПО ССЫЛКЕ ==========
-async def download_music_from_url(url, message=None):
-    """Скачивание музыки по ссылке (SoundCloud, Spotify)"""
-    try:
-        if message:
-            await message.edit_text("🎵 Скачиваю музыку по ссылке...")
-        
-        ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'music_%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'retries': 5,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+# ========== ПРОГРЕСС ХУК ==========
+def make_progress_hook(message, msg) -> Callable:
+    def progress(d):
+        if d["status"] != "downloading":
+            return
+        try:
+            last = last_edited.get(f"{message.chat.id}-{msg.message_id}")
+            if last and (datetime.datetime.now() - last).total_seconds() < 5:
+                return
             
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                return [{'path': filename, 'type': 'audio', 'size': os.path.getsize(filename)}], 'single'
-        
-        return None, "Не удалось скачать музыку"
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Music URL ошибка: {error_msg}")
-        
-        if "404" in error_msg:
-            return None, "❌ Ссылка недоступна. Попробуйте найти музыку по названию: песня Название"
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
+            downloaded_bytes = d.get("downloaded_bytes", 0)
+            if downloaded_bytes > MAX_FILESIZE:
+                raise DownloadCancelled("File too large")
+            
+            perc = round(d["downloaded_bytes"] * 100 / d["total_bytes"])
+            bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=msg.message_id,
+                text=f"📥 Скачивание: {d.get('info_dict', {}).get('title', 'файла')[:50]}...\n\n{perc}%\n\n<i>SELG Bot v{BOT_VERSION}</i>",
+                parse_mode="HTML",
+            )
+            last_edited[f"{message.chat.id}-{msg.message_id}"] = datetime.datetime.now()
+        except DownloadCancelled:
+            raise
+        except Exception as e:
+            logger.error(f"Progress hook error: {e}")
+    return progress
 
-# ========== ОПРЕДЕЛЕНИЕ ПЛАТФОРМЫ ==========
-def detect_platform(url):
-    url_lower = url.lower()
+# ========== ОТПРАВКА МЕДИА ==========
+def send_media(message, info: Any, audio: bool = False) -> None:
+    downloads = info.get("requested_downloads") or None
+    if not downloads:
+        if info.get("entries") is not None and len(info.get("entries")) > 0:
+            downloads = info.get("entries")[0].get("requested_downloads") or None
+    if not downloads or len(downloads) == 0:
+        raise Exception("No requested downloads found")
     
-    if 'tiktok.com' in url_lower:
-        return 'tiktok', '🎵 TikTok'
-    elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
-        return 'youtube', '▶️ YouTube'
-    elif 'soundcloud.com' in url_lower or 'spotify.com' in url_lower:
-        return 'music_url', '🎶 Музыка по ссылке'
-    else:
-        return 'unknown', '❓ Неизвестно'
+    filepath = downloads[0]["filepath"]
+    file_size = os.path.getsize(filepath)
+    
+    with open(filepath, "rb") as f:
+        if audio:
+            bot.send_audio(message.chat.id, f, reply_to_message_id=message.message_id)
+        else:
+            bot.send_video(
+                message.chat.id, f, reply_to_message_id=message.message_id,
+                width=downloads[0].get("width", 0), height=downloads[0].get("height", 0),
+                caption=f"🎬 Скачано с помощью {BOT_NAME} Bot"
+            )
+    
+    os.remove(filepath)
+    logger.info(f"Файл отправлен и удален: {filepath} ({format_size(file_size)})")
+
+# ========== ОЧИСТКА ==========
+def cleanup_file(video_title: int) -> None:
+    for file in os.listdir(OUTPUT_FOLDER):
+        if file.startswith(str(video_title)):
+            os.remove(os.path.join(OUTPUT_FOLDER, file))
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ СКАЧИВАНИЯ ==========
+def download_media(message, content, audio=False, format_id=None) -> None:
+    # Проверка URL
+    match = re.search(r"https?://\S+", content)
+    url = match.group(0) if match else content
+    
+    if not urlparse(url).scheme:
+        bot.reply_to(message, "❌ Неверный URL")
+        return
+    
+    if not is_allowed_domain(url):
+        bot.reply_to(message, f"❌ Неподдерживаемая платформа.\n\nПоддерживаются: YouTube, TikTok, Instagram, Twitter")
+        return
+    
+    if urlparse(url).netloc in {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com", "youtube-nocookie.com"}:
+        if not youtube_url_validation(url):
+            bot.reply_to(message, "❌ Неверная ссылка YouTube")
+            return
+    
+    # Статусное сообщение
+    msg = bot.reply_to(message, f"📥 Начинаю скачивание...\n\n{SELG_Bot v{BOT_VERSION}}", parse_mode="HTML")
+    video_title = round(time.time() * 1000)
+    
+    # Настройки yt-dlp
+    ydl_opts = {
+        "format": format_id if format_id else "bestvideo+bestaudio/best",
+        "outtmpl": f"{OUTPUT_FOLDER}/{video_title}.%(ext)s",
+        "progress_hooks": [make_progress_hook(message, msg)],
+        "max_filesize": MAX_FILESIZE,
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}] if audio else [],
+    }
+    
+    # Добавляем JS runtime для YouTube
+    if JS_RUNTIME:
+        ydl_opts["js_runtimes"] = JS_RUNTIME
+    
+    # Добавляем cookies если есть
+    cookie_file = None
+    try:
+        user_id = message.from_user.id
+        db_cursor.execute("SELECT cookie_data FROM user_cookies WHERE user_id = ?", (user_id,))
+        result = db_cursor.fetchone()
+        
+        if result:
+            decrypted_data = decrypt_cookie(result[0])
+            cookie_file = f"{OUTPUT_FOLDER}/cookies_{user_id}.txt"
+            with open(cookie_file, "w") as f:
+                f.write(decrypted_data)
+            ydl_opts["cookiefile"] = cookie_file
+            logger.info(f"🍪 Используются cookies для user {user_id}")
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            bot.edit_message_text(
+                chat_id=message.chat.id, message_id=msg.message_id,
+                text="📤 Отправляю файл в Telegram..."
+            )
+            send_media(message, info, audio)
+            bot.delete_message(message.chat.id, msg.message_id)
+            
+    except DownloadCancelled:
+        bot.edit_message_text("❌ Файл слишком большой!", message.chat.id, msg.message_id)
+    except (DownloadError, ExtractorError) as e:
+        err = str(e).lower()
+        if "sign in" in err or "login required" in err:
+            text = "⚠️ YouTube требует авторизации.\n\n💡 Используйте команду /cookies и отправьте cookies.txt файл из браузера"
+        elif "rate-limit" in err:
+            text = "⚠️ Слишком много запросов. Попробуйте через 10-15 минут"
+        else:
+            text = f"❌ Ошибка при скачивании: {str(e)[:100]}"
+        bot.edit_message_text(text, message.chat.id, msg.message_id)
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        bot.edit_message_text(
+            f"❌ Не удалось скачать. Убедитесь, что файл меньше {round(MAX_FILESIZE / 1_000_000)}MB",
+            message.chat.id, msg.message_id
+        )
+    finally:
+        if cookie_file and os.path.exists(cookie_file):
+            os.remove(cookie_file)
+        cleanup_file(video_title)
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📖 Инструкция", callback_data="help"),
-         InlineKeyboardButton("❓ FAQ", callback_data="faq")],
-        [InlineKeyboardButton("📱 Поддерживаемые платформы", callback_data="platforms"),
-         InlineKeyboardButton("🎵 Поиск музыки", callback_data="music")],
-        [InlineKeyboardButton("📞 Контакты", callback_data="contacts"),
-         InlineKeyboardButton("👤 О боте", callback_data="about")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("📖 Инструкция", callback_data="help"),
+        types.InlineKeyboardButton("❓ FAQ", callback_data="faq")
+    )
+    keyboard.add(
+        types.InlineKeyboardButton("📱 Платформы", callback_data="platforms"),
+        types.InlineKeyboardButton("🎵 Музыка", callback_data="music")
+    )
+    keyboard.add(
+        types.InlineKeyboardButton("🍪 Cookies", callback_data="cookies_info"),
+        types.InlineKeyboardButton("📞 Контакты", callback_data="contacts")
+    )
+    keyboard.add(
+        types.InlineKeyboardButton("👤 О боте", callback_data="about")
+    )
+    return keyboard
 
 def get_back_keyboard():
-    keyboard = [[InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]]
-    return InlineKeyboardMarkup(keyboard)
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu"))
+    return keyboard
 
 # ========== КОМАНДЫ БОТА ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    
+@bot.message_handler(commands=["start", "help"])
+def start_command(message):
+    user = message.from_user
     welcome_text = f"""
 🌟 <b>ДОБРО ПОЖАЛОВАТЬ, {user.first_name}!</b>
 
@@ -223,20 +308,219 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ╚══════════════════════════════════════════════╝
 
 ✨ <b>Что умеет бот:</b>
+• ▶️ <b>YouTube</b> - видео (включая Shorts)
 • 🎵 <b>TikTok</b> - видео без водяного знака
-• 🎶 <b>Музыка</b> - поиск по названию или по ссылке (SoundCloud, Spotify)
+• 📸 <b>Instagram</b> - публичные посты и Reels
+• 🐦 <b>Twitter/X</b> - видео
+• 🎶 <b>Музыка</b> - команда /audio <ссылка>
 
-⚙️ <b>В разработке:</b>
-• ▶️ YouTube - скоро будет доступен
-
-🎯 <b>Просто отправьте ссылку TikTok или напишите "песня Название"</b>
+🎯 <b>Просто отправьте ссылку или используйте команды:</b>
+• /audio <url> - скачать аудио MP3
+• /custom <url> - выбрать формат
+• /cookies - добавить cookies (для YouTube)
 
 📞 <b>Контакты:</b> @barbosick89
 """
-    await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=get_main_keyboard())
+    bot.reply_to(message, welcome_text, parse_mode="HTML", reply_markup=get_main_keyboard())
 
-async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    about_text = f"""
+@bot.message_handler(commands=["download"])
+def download_command(message):
+    text = message.text.replace("/download", "").strip()
+    if not text:
+        bot.reply_to(message, "❌ Используйте: `/download https://youtu.be/...`", parse_mode="Markdown")
+        return
+    download_media(message, text, audio=False)
+
+@bot.message_handler(commands=["audio"])
+def audio_command(message):
+    text = message.text.replace("/audio", "").strip()
+    if not text:
+        bot.reply_to(message, "❌ Используйте: `/audio https://youtu.be/...`", parse_mode="Markdown")
+        return
+    download_media(message, text, audio=True)
+
+@bot.message_handler(commands=["custom"])
+def custom_command(message):
+    text = message.text.replace("/custom", "").strip()
+    if not text:
+        bot.reply_to(message, "❌ Используйте: `/custom https://youtu.be/...`", parse_mode="Markdown")
+        return
+    
+    msg = bot.reply_to(message, "🔍 Получаю доступные форматы...")
+    try:
+        with yt_dlp.YoutubeDL() as ydl:
+            info = ydl.extract_info(text, download=False)
+        
+        formats = info.get("formats") or []
+        data = {}
+        for f in formats:
+            if f.get("vcodec") != "none":
+                resolution = f.get("resolution", "unknown")
+                ext = f.get("ext", "mp4")
+                label = f"{resolution}.{ext}"
+                data[label] = {"callback_data": f"format_{f['format_id']}"}
+        
+        if not data:
+            bot.edit_message_text("❌ Не найдено доступных форматов", message.chat.id, msg.message_id)
+        else:
+            markup = quick_markup(data, row_width=2)
+            bot.delete_message(msg.chat.id, msg.message_id)
+            bot.reply_to(message, "🎬 Выберите формат:", reply_markup=markup)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка: {str(e)[:100]}", message.chat.id, msg.message_id)
+
+@bot.message_handler(commands=["cookies"])
+def cookies_command(message):
+    bot.reply_to(message, 
+        "🍪 **Cookies для YouTube**\n\n"
+        "1. Установите расширение [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)\n"
+        "2. Войдите в YouTube в браузере\n"
+        "3. Нажмите на иконку расширения и экспортируйте cookies\n"
+        "4. Отправьте полученный файл с командой /cookies\n\n"
+        "После этого бот сможет обходить блокировки YouTube!",
+        parse_mode="Markdown", disable_web_page_preview=True)
+
+@bot.message_handler(content_types=["document"])
+def handle_cookie_file(message):
+    if not message.document:
+        return
+    
+    user_id = message.from_user.id
+    file_info = bot.get_file(message.document.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    
+    try:
+        cookie_data = downloaded_file.decode("utf-8")
+        filtered_data = filter_cookies_by_domain(cookie_data)
+        encrypted_data = encrypt_cookie(filtered_data)
+        
+        db_cursor.execute(
+            "INSERT OR REPLACE INTO user_cookies (user_id, cookie_data) VALUES (?, ?)",
+            (user_id, encrypted_data)
+        )
+        db_conn.commit()
+        bot.reply_to(message, "✅ Cookies успешно сохранены! Теперь YouTube будет работать лучше.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при сохранении cookies: {str(e)[:100]}")
+
+@bot.message_handler(commands=["id"])
+def get_id(message):
+    bot.reply_to(message, f"Chat ID: `{message.chat.id}`", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: True, content_types=["text"])
+def handle_url(message):
+    text = message.text.strip()
+    if re.match(r"https?://\S+", text):
+        download_media(message, text, audio=False)
+
+# ========== ОБРАБОТЧИК КНОПОК ==========
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    if call.data == "help":
+        help_text = f"""
+📖 <b>ИНСТРУКЦИЯ</b>
+
+<b>🟢 Команды:</b>
+• /download <url> - скачать видео
+• /audio <url> - скачать аудио MP3
+• /custom <url> - выбрать формат
+• /cookies - добавить cookies для YouTube
+
+<b>Поддерживаемые платформы:</b>
+• YouTube, TikTok, Instagram, Twitter/X
+
+⚙️ <b>YouTube не работает?</b>
+Используйте команду /cookies и отправьте cookies файл
+"""
+        bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "faq":
+        faq_text = f"""
+❓ <b>FAQ</b>
+
+<b>❌ YouTube не скачивается?</b>
+• Используйте /cookies и отправьте cookies из браузера
+• Подождите 10-15 минут (временная блокировка)
+
+<b>🎵 Как скачать аудио?</b>
+• /audio https://youtu.be/...
+
+<b>💰 Бесплатно?</b>
+• Да, бот полностью бесплатный!
+
+<b>🐛 Нашёл баг?</b>
+• @barbosick89
+
+<b>📌 Версия:</b> {BOT_NAME} v{BOT_VERSION}
+"""
+        bot.edit_message_text(faq_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "platforms":
+        platforms_text = """
+📱 <b>ПЛАТФОРМЫ</b>
+
+✅ <b>Поддерживаются:</b>
+• ▶️ YouTube (с cookies)
+• 🎵 TikTok
+• 📸 Instagram (публичные)
+• 🐦 Twitter/X
+
+💡 <b>Совет:</b>
+Для YouTube используйте /cookies для обхода блокировок
+"""
+        bot.edit_message_text(platforms_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "music":
+        music_text = """
+🎵 <b>МУЗЫКА</b>
+
+<b>Как скачать MP3:</b>
+<code>/audio https://youtu.be/...</code>
+
+Поддерживаются любые видео с YouTube, TikTok, Instagram
+
+📌 Формат: MP3, 192 kbps
+"""
+        bot.edit_message_text(music_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "cookies_info":
+        cookies_text = """
+🍪 <b>COOKIES ДЛЯ YOUTUBE</b>
+
+<b>Зачем нужны?</b>
+YouTube блокирует скачивание из облака. Cookies решают эту проблему.
+
+<b>Как получить:</b>
+1. Установите расширение "Get cookies.txt LOCALLY"
+2. Войдите в YouTube в браузере
+3. Экспортируйте cookies в файл
+4. Отправьте файл боту командой /cookies
+
+<b>Безопасно?</b>
+Cookies хранятся в зашифрованном виде
+"""
+        bot.edit_message_text(cookies_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "contacts":
+        contacts_text = f"""
+📞 <b>КОНТАКТЫ</b>
+
+🐛 <b>По вопросам и багам:</b>
+• Telegram: <b>@barbosick89</b>
+
+💡 <b>По любым вопросам:</b>
+• Ошибки в работе
+• Предложения
+
+⏰ <b>Время ответа:</b>
+Обычно в течение 24 часов
+
+📌 <b>{BOT_NAME} v{BOT_VERSION}</b>
+"""
+        bot.edit_message_text(contacts_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
+    
+    elif call.data == "about":
+        about_text = f"""
 👤 <b>О БОТЕ</b>
 
 <b>Название:</b> {BOT_NAME}
@@ -244,327 +528,50 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Разработчик:</b> @barbosick89
 
 ✨ <b>Возможности:</b>
-• 🎵 TikTok (работает)
-• 🎶 Музыка по названию (работает)
-• 🎧 SoundCloud/Spotify (работает)
-• ▶️ YouTube (в разработке)
+• YouTube (с cookies)
+• TikTok
+• Instagram
+• Twitter/X
 
 📡 <b>Хостинг:</b> Render
-🌍 <b>Статус:</b> 24/7
-💡 <b>Бесплатный бот</b> для скачивания контента
+🍪 <b>Cookies:</b> зашифрованы
 
-🐛 <b>Нашли баг?</b> Свяжитесь: @barbosick89
+🐛 <b>Нашли баг?</b> @barbosick89
 """
-    if update.callback_query:
-        await update.callback_query.message.edit_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(about_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = f"""
-📖 <b>ИНСТРУКЦИЯ</b>
-
-<b>🟢 Работает сейчас:</b>
-
-• <b>TikTok</b> - видео
-  Пример: <code>https://www.tiktok.com/@user/video/123</code>
-
-• <b>Музыка по названию</b>
-  Пример: <code>песня Imagine Dragons Believer</code>
-
-• <b>Музыка по ссылке</b> - SoundCloud/Spotify
-  Пример: <code>https://soundcloud.com/artist/track</code>
-
-⚙️ <b>В разработке:</b>
-• <b>YouTube</b> - временно недоступен
-
-⚠️ <b>Важно:</b>
-• TikTok иногда блокирует - попробуйте позже
-• Для музыки пишите "песня Название"
-
-📞 <b>Контакты:</b> @barbosick89
-"""
-    if update.callback_query:
-        await update.callback_query.message.edit_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def platforms_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    platforms_text = f"""
-📱 <b>ПОДДЕРЖИВАЕМЫЕ ПЛАТФОРМЫ</b>
-
-✅ <b>Работают сейчас:</b>
-• 🎵 <b>TikTok</b> - видео без водяного знака
-• 🎶 <b>Музыка</b> - поиск по названию (YouTube Music)
-• 🎵 <b>SoundCloud</b> - прямая ссылка
-• 🎧 <b>Spotify</b> - прямая ссылка (трек)
-
-⚙️ <b>В разработке:</b>
-• ▶️ <b>YouTube</b> - скоро добавим
-• 📸 <b>Instagram</b> - в планах
-
-💡 <b>Как скачать музыку:</b>
-Напишите: <code>песня Название песни</code>
-
-📞 <b>Контакты:</b> @barbosick89
-"""
-    if update.callback_query:
-        await update.callback_query.message.edit_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(platforms_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    faq_text = f"""
-❓ <b>FAQ - ЧАСТЫЕ ВОПРОСЫ</b>
-
-<b>🎵 Как скачать музыку по названию?</b>
-Напишите: <code>песня Название песни</code>
-
-<b>🎵 Как скачать музыку по ссылке?</b>
-Отправьте ссылку из SoundCloud или Spotify
-
-<b>⏳ Почему долго скачивается?</b>
-Зависит от размера файла и скорости интернета
-
-<b>⚠️ TikTok выдаёт ошибку?</b>
-TikTok иногда блокирует запросы. Подождите 5-10 минут
-
-<b>💰 Это бесплатно?</b>
-Да, бот полностью бесплатный!
-
-<b>🐛 Нашёл ошибку?</b>
-Свяжитесь: @barbosick89
-
-<b>📌 Версия бота:</b> {BOT_NAME} v{BOT_VERSION}
-"""
-    if update.callback_query:
-        await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def music_search_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    music_text = """
-🎵 <b>ПОИСК МУЗЫКИ</b>
-
-<b>Способы скачать музыку:</b>
-
-1️⃣ <b>По названию:</b>
-   Напишите: <code>песня Название</code>
-   Пример: <code>песня Billie Eilish bad guy</code>
-
-2️⃣ <b>По ссылке:</b>
-   Отправьте ссылку на трек:
-   • SoundCloud
-   • Spotify
-
-📌 <b>Поддерживаемые форматы:</b> MP3 (192 kbps)
-
-💡 <b>Совет:</b> Чем точнее название, тем лучше результат
-"""
-    if update.callback_query:
-        await update.callback_query.message.edit_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contacts_text = f"""
-📞 <b>КОНТАКТНАЯ ИНФОРМАЦИЯ</b>
-
-🐛 <b>По вопросам и багам:</b>
-• Telegram: <b>@barbosick89</b>
-
-💡 <b>Обращаться по любым вопросам:</b>
-• Ошибки в работе бота
-• Предложения по улучшению
-• Новые идеи для функционала
-
-⏰ <b>Время ответа:</b>
-Обычно в течение 24 часов
-
-📌 <b>{BOT_NAME} v{BOT_VERSION}</b>
-
-🌟 <b>Спасибо, что пользуетесь ботом!</b>
-"""
-    if update.callback_query:
-        await update.callback_query.message.edit_text(contacts_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-    else:
-        await update.message.reply_text(contacts_text, parse_mode='HTML', reply_markup=get_back_keyboard())
-
-async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.edit_text(
-        f"🎯 <b>ГЛАВНОЕ МЕНЮ</b>\n\nПросто отправьте ссылку TikTok или напишите 'песня Название'!\n\n{BOT_NAME} v{BOT_VERSION}",
-        parse_mode='HTML',
-        reply_markup=get_main_keyboard()
-    )
-
-# ========== ОБРАБОТЧИК СООБЩЕНИЙ ==========
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    logger.info(f"📨 Получено сообщение: {text[:100]}...")
+        bot.edit_message_text(about_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_keyboard())
     
-    # Проверка на поиск музыки
-    music_keywords = ['песня', 'музыка', 'скачать музыку', 'song', 'music']
-    if any(kw in text.lower() for kw in music_keywords) and not ('http' in text):
-        query = text
-        for kw in music_keywords:
-            query = query.lower().replace(kw, '').strip()
-        
-        status_msg = await update.message.reply_text(
-            f"🔍 <b>Ищу музыку:</b> {query}\n⏳ Подождите...",
-            parse_mode='HTML'
+    elif call.data == "main_menu":
+        bot.edit_message_text(
+            "🎯 <b>ГЛАВНОЕ МЕНЮ</b>\n\nОтправьте ссылку или используйте команды!",
+            call.message.chat.id, call.message.message_id,
+            parse_mode="HTML", reply_markup=get_main_keyboard()
         )
-        
-        files, _ = await search_and_download_music(query, status_msg)
-        
-        if files and os.path.exists(files[0]['path']):
-            await status_msg.edit_text("✅ Отправляю...")
-            with open(files[0]['path'], 'rb') as f:
-                await update.message.reply_audio(
-                    audio=f,
-                    title=os.path.basename(files[0]['path']).replace('.mp3', ''),
-                    performer=f"{BOT_NAME} Bot"
-                )
-            os.remove(files[0]['path'])
-            await status_msg.delete()
-        else:
-            await status_msg.edit_text(
-                "❌ <b>Музыка не найдена</b>\n\n"
-                "Попробуйте:\n"
-                "• Уточнить название\n"
-                "• Отправить ссылку из SoundCloud/Spotify\n"
-                "• Пример: песня Imagine Dragons Believer",
-                parse_mode='HTML'
-            )
-        return
     
-    # Определяем платформу для ссылок
-    platform, platform_name = detect_platform(text)
+    elif call.data.startswith("format_"):
+        format_id = call.data.replace("format_", "")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        download_media(call.message.reply_to_message, call.message.reply_to_message.text, format_id=format_id)
     
-    if platform == 'unknown':
-        await update.message.reply_text(
-            f"❌ <b>Неверная ссылка!</b>\n\n"
-            f"Поддерживаются:\n"
-            f"• 🎵 TikTok (tiktok.com/@.../video/...)\n"
-            f"• 🎶 Музыка: напишите 'песня Название'\n"
-            f"• 🎵 SoundCloud/Spotify ссылки\n\n"
-            f"⚙️ YouTube временно в разработке\n\n"
-            f"Используйте /help для инструкции\n\n"
-            f"📌 {BOT_NAME} v{BOT_VERSION}",
-            parse_mode='HTML'
-        )
-        return
-    
-    # Скачивание
-    status_msg = await update.message.reply_text(
-        f"📥 <b>Скачиваю с {platform_name}</b>\n\n⏳ Подождите...",
-        parse_mode='HTML'
-    )
-    
-    if platform == 'youtube':
-        files, _ = await download_youtube(text, status_msg)
-    elif platform == 'tiktok':
-        files, _ = await download_tiktok(text, status_msg)
-    elif platform == 'music_url':
-        files, _ = await download_music_from_url(text, status_msg)
-    else:
-        files = None
-    
-    if files and len(files) > 0:
-        file = files[0]
-        file_size_mb = file['size'] / (1024 * 1024)
-        
-        if file_size_mb > 50:
-            await status_msg.edit_text(f"❌ Файл слишком большой ({file_size_mb:.1f} МБ)\nМаксимум: 50 МБ")
-            if os.path.exists(file['path']):
-                os.remove(file['path'])
-            return
-        
-        await status_msg.edit_text(f"✅ <b>Готово!</b>\n📏 Размер: {format_size(file['size'])}\n📤 Отправляю...", parse_mode='HTML')
-        
-        try:
-            with open(file['path'], 'rb') as f:
-                if file['type'] == 'video':
-                    await update.message.reply_video(video=f, caption=f"🎬 Скачано с {platform_name}", supports_streaming=True)
-                else:
-                    await update.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
-            
-            if os.path.exists(file['path']):
-                os.remove(file['path'])
-            await status_msg.delete()
-            
-        except Exception as e:
-            logger.error(f"Ошибка отправки: {e}")
-            await status_msg.edit_text(f"❌ Ошибка при отправке\n\nСвяжитесь с поддержкой: @barbosick89")
-    else:
-        error_msg = files if isinstance(files, str) else "Неизвестная ошибка"
-        await status_msg.edit_text(
-            f"❌ <b>Не удалось скачать</b>\n\n"
-            f"📱 Платформа: {platform_name}\n"
-            f"🔍 Ошибка: {error_msg[:200]}\n\n"
-            f"💡 Если ошибка повторяется, свяжитесь с поддержкой:\n"
-            f"📞 @barbosick89\n\n"
-            f"📌 {BOT_NAME} v{BOT_VERSION}",
-            parse_mode='HTML'
-        )
-
-# ========== ОБРАБОТЧИК КНОПОК ==========
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    if query.data == "help":
-        await help_command(update, context)
-    elif query.data == "faq":
-        await faq(update, context)
-    elif query.data == "platforms":
-        await platforms_info(update, context)
-    elif query.data == "music":
-        await music_search_info(update, context)
-    elif query.data == "contacts":
-        await contacts(update, context)
-    elif query.data == "about":
-        await about_command(update, context)
-    elif query.data == "main_menu":
-        await main_menu(update, context)
-    
-    await query.answer()
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"❌ Ошибка: {context.error}")
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            f"⚠️ Произошла ошибка.\n\n"
-            f"Пожалуйста, попробуйте позже или свяжитесь с поддержкой:\n"
-            f"📞 @barbosick89\n\n"
-            f"📌 {BOT_NAME} v{BOT_VERSION}"
-        )
+    bot.answer_callback_query(call.id)
 
 # ========== ЗАПУСК БОТА ==========
 def run_bot():
     logger.info(f"🤖 Запуск {BOT_NAME} v{BOT_VERSION}...")
-    
     try:
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_error_handler(error_handler)
-        
-        application.run_polling(drop_pending_updates=True)
-        
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        sys.exit(1)
+        time.sleep(10)
+        run_bot()
 
-# ========== ГЛАВНЫЙ ЗАПУСК ==========
+# ========== MAIN ==========
 if __name__ == "__main__":
     logger.info(f"🚀 ЗАПУСК {BOT_NAME} v{BOT_VERSION} НА RENDER")
     
+    # Запускаем Flask в потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
+    logger.info("✅ Flask сервер запущен")
     
-    time.sleep(2)
+    # Запускаем бота
     run_bot()
