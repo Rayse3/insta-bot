@@ -1,0 +1,37 @@
+name: Keep Bot Alive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping bot
+        run: |
+          URL="https://insta-bot-2-nv7k.onrender.com/health"
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "⏰ Время: $TIMESTAMP"
+          echo "🌐 URL: $URL"
+          
+          START_TIME=$(date +%s%N)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$URL")
+          END_TIME=$(date +%s%N)
+          DURATION=$(( ($END_TIME - $START_TIME) / 1000000 ))
+          
+          echo "📊 Ответ: HTTP $HTTP_CODE"
+          echo "⚡ Время ответа: ${DURATION}ms"
+          
+          if [ $HTTP_CODE -eq 200 ]; then
+            echo "✅ Статус: БОТ АКТИВЕН"
+          else
+            echo "❌ Статус: БОТ НЕ ОТВЕЧАЕТ (код $HTTP_CODE)"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Сохраняем результат в файл
+          echo "$TIMESTAMP - HTTP $HTTP_CODE - ${DURATION}ms" >> ping_history.txt
