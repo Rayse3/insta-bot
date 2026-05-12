@@ -114,8 +114,20 @@ def get_youtube_cookies():
 # ========== ФУНКЦИИ СКАЧИВАНИЯ ==========
 
 def get_instaloader(with_login=False):
-    """Создает настроенный экземпляр Instaloader с поддержкой сессии"""
+    """Создает настроенный экземпляр Instaloader с поддержкой сессии и принудительным удалением старой сессии"""
     import instaloader
+    
+    # ===== ПРИНУДИТЕЛЬНО УДАЛЯЕМ СТАРУЮ СЕССИЮ =====
+    session_files_to_remove = [SESSION_FILE, f"{SESSION_FILE}.json", f"{SESSION_FILE}.json.xz"]
+    
+    for session_file in session_files_to_remove:
+        if os.path.exists(session_file):
+            try:
+                os.remove(session_file)
+                logger.info(f"🗑 Удален старый файл сессии: {session_file}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось удалить {session_file}: {e}")
+    # ===========================================
     
     loader = instaloader.Instaloader(
         download_videos=True,
@@ -125,30 +137,46 @@ def get_instaloader(with_login=False):
         filename_pattern="{shortcode}_{date_utc}_UTC",
         dirname_pattern=DOWNLOAD_DIR,
         max_connection_attempts=5,
-        request_timeout=60
+        request_timeout=60,
+        sleep_requests=1.0,  # Задержка между запросами
+        sleep_between_downloads=1.0  # Задержка между скачиваниями
     )
     
     if with_login and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
-        # Пробуем загрузить существующую сессию
-        if os.path.exists(SESSION_FILE):
-            try:
-                loader.load_session(INSTAGRAM_USERNAME, SESSION_FILE)
-                logger.info(f"✅ Загружена сохраненная сессия для {INSTAGRAM_USERNAME}")
-                return loader
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось загрузить сессию: {e}")
+        logger.info(f"🔐 Пытаемся авторизоваться как {INSTAGRAM_USERNAME}...")
         
-        # Если сессии нет, пытаемся войти и сохранить сессию
         try:
+            # Пытаемся войти и сохранить сессию
             loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
             loader.save_session(SESSION_FILE)
-            logger.info(f"✅ Авторизован в Instagram как {INSTAGRAM_USERNAME}, сессия сохранена")
+            logger.info(f"✅ Успешная авторизация в Instagram как {INSTAGRAM_USERNAME}, сессия сохранена")
+            
+            # Проверяем, что авторизация действительно работает
+            try:
+                profile = loader.context.username
+                logger.info(f"👤 Авторизован пользователь: {profile}")
+            except:
+                pass
+                
+            return loader
+            
+        except instaloader.exceptions.TwoFactorAuthRequiredException:
+            logger.error("❌ Instagram требует двухфакторную аутентификацию! Используйте аккаунт без 2FA")
+            return None
+        except instaloader.exceptions.BadCredentialsException:
+            logger.error("❌ Неверный логин или пароль Instagram!")
+            return None
+        except instaloader.exceptions.ConnectionException as e:
+            logger.error(f"❌ Ошибка соединения с Instagram: {e}")
+            return None
         except Exception as e:
-            logger.warning(f"⚠️ Не удалось авторизоваться: {e}")
+            logger.error(f"❌ Не удалось авторизоваться: {e}")
+            return None
     
     return loader
+
 async def download_instagram_post(url, message=None):
-    """Скачивание контента из Instagram с подробным логированием"""
+    """Скачивание контента из Instagram с подробным логированием и сохранением сессии"""
     try:
         import instaloader
         import traceback
@@ -175,42 +203,26 @@ async def download_instagram_post(url, message=None):
             logger.error("❌ Instagram логин или пароль не заданы!")
             return None, "❌ Не заданы логин и пароль Instagram. Добавьте переменные INSTAGRAM_USERNAME и INSTAGRAM_PASSWORD в настройках Render."
         
-        logger.info(f"🔐 Пытаемся авторизоваться как {INSTAGRAM_USERNAME}...")
-        
-        # Создаём загрузчик
-        loader = instaloader.Instaloader(
-            download_videos=True,
-            download_pictures=True,
-            save_metadata=False,
-            post_metadata_txt_pattern="",
-            filename_pattern="{shortcode}_{date_utc}_UTC",
-            dirname_pattern=DOWNLOAD_DIR,
-            max_connection_attempts=3,
-            request_timeout=60
-        )
-        
-        # Пытаемся авторизоваться
-        try:
-            loader.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
-            logger.info(f"✅ Успешная авторизация как {INSTAGRAM_USERNAME}")
-            if message:
-                await message.edit_text(f"✅ Авторизация успешна! Получаю данные...")
-        except Exception as e:
-            logger.error(f"❌ Ошибка авторизации: {e}")
-            return None, f"❌ Ошибка авторизации: {str(e)[:150]}"
+        # Получаем авторизованный загрузчик
+        loader = get_instaloader(with_login=True)
+        if loader is None:
+            return None, "❌ Не удалось авторизоваться в Instagram. Проверьте логин и пароль."
         
         # Получаем пост
         try:
             logger.info(f"📥 Получаем пост {shortcode}...")
             post = instaloader.Post.from_shortcode(loader.context, shortcode)
-            logger.info(f"📸 Пост получен. Тип: {'видео' if post.is_video else 'фото'}")
+            logger.info(f"📸 Пост получен. Тип: {'видео' if post.is_video else 'фото'}, владелец: {post.owner_username}")
             
             if message:
                 await message.edit_text(f"📥 Скачиваю {'видео' if post.is_video else 'фото'}...")
             
-            # Скачиваем
+            # Скачиваем пост
             loader.download_post(post, target=shortcode)
             logger.info(f"💾 Скачивание завершено, ищем файлы...")
+            
+            # Даем время на запись файлов
+            await asyncio.sleep(1)
             
             # Ищем скачанные файлы
             files = []
@@ -222,24 +234,23 @@ async def download_instagram_post(url, message=None):
                         files.append({'path': file_path, 'type': file_type, 'size': os.path.getsize(file_path)})
                         logger.info(f"📁 Найден файл: {file} ({os.path.getsize(file_path)} bytes)")
             
-            if files:
-                logger.info(f"✅ Успешно скачано {len(files)} файлов")
-                return files, 'carousel' if len(files) > 1 else 'single'
-            else:
-                # Проверяем любые файлы в папке
+            # Если не нашли по shortcode, ищем любые недавние файлы
+            if not files:
+                logger.info("🔍 Ищем все недавние файлы в папке downloads...")
                 for file in os.listdir(DOWNLOAD_DIR):
                     file_path = os.path.join(DOWNLOAD_DIR, file)
                     if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
                         if file.endswith('.mp4'):
                             files.append({'path': file_path, 'type': 'video', 'size': os.path.getsize(file_path)})
+                            logger.info(f"📁 Найден видеофайл: {file}")
                         elif file.endswith(('.jpg', '.png')):
                             files.append({'path': file_path, 'type': 'photo', 'size': os.path.getsize(file_path)})
-                            logger.info(f"📁 Найден альтернативный файл: {file}")
-                
-                if files:
-                    logger.info(f"✅ Найдено {len(files)} файлов в папке downloads")
-                    return files, 'single' if len(files) == 1 else 'carousel'
-                    
+                            logger.info(f"📁 Найден фотофайл: {file}")
+            
+            if files:
+                logger.info(f"✅ Успешно скачано {len(files)} файлов")
+                return files, 'carousel' if len(files) > 1 else 'single'
+            else:
                 logger.error("❌ Файлы не найдены после скачивания")
                 return None, "Файлы не найдены после скачивания"
                 
@@ -262,86 +273,84 @@ async def download_instagram_post(url, message=None):
         logger.error(f"❌ Общая ошибка Instagram: {e}")
         traceback.print_exc()
         return None, str(e)[:200]
+
 async def download_youtube(url, message=None):
-    """Скачивание из YouTube через публичное API (обход блокировки)"""
+    """Скачивание из YouTube через yt-dlp"""
     try:
-        import aiohttp
+        from yt_dlp import YoutubeDL
         
         if message:
-            await message.edit_text("📥 Отправляю запрос к серверу...")
+            await message.edit_text("📥 Подготавливаю скачивание YouTube видео...")
         
-        # Используем API для получения ссылки на скачивание
-        # (это публичный API, может быть медленным)
-        api_url = f"https://api.downloadyoutubevideo.com/api/download?url={url}"
+        ydl_opts = {
+            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'best[height<=720]',  # Ограничиваем размер
+            'merge_output_format': 'mp4',
+            'retries': 10,
+            'fragment_retries': 10,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extract_flat': False,
+        }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as resp:
-                data = await resp.json()
-                
-                if data.get('success') or data.get('download_url'):
-                    download_url = data.get('download_url') or data.get('url')
-                    video_title = data.get('title', 'video')
-                    
-                    if message:
-                        await message.edit_text(f"📥 Скачиваю: {video_title[:50]}...")
-                    
-                    async with session.get(download_url) as file_resp:
-                        filename = os.path.join(DOWNLOAD_DIR, f"youtube_{int(time.time())}.mp4")
-                        with open(filename, 'wb') as f:
-                            f.write(await file_resp.read())
-                        
-                        if os.path.getsize(filename) > 0:
-                            return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
-                
-                return None, "Не удалось получить ссылку на видео"
-                
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"YouTube API ошибка: {error_msg}")
+        cookie_file = get_youtube_cookies()
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            logger.info("🍪 Используем cookies для YouTube")
         
-        if "Sign in to confirm" in error_msg:
-            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Попробуйте:\n• Отправить ссылку через 5-10 минут\n• Использовать другое видео"
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            # Проверяем существование файла
+            if not os.path.exists(filename):
+                for ext in ['.mp4', '.webm', '.mkv']:
+                    test_path = filename.rsplit('.', 1)[0] + ext
+                    if os.path.exists(test_path):
+                        filename = test_path
+                        break
+            
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                return [{'path': filename, 'type': 'video', 'size': os.path.getsize(filename)}], 'single'
+                
+        return None, "Не удалось скачать видео"
         
     except Exception as e:
         error_msg = str(e)
         logger.error(f"YouTube ошибка: {error_msg}")
         
-        # Понятное сообщение для пользователя
         if "Sign in to confirm" in error_msg:
-            return None, "⚠️ YouTube блокирует запросы.\n\n💡 Чтобы исправить:\n1. Установите расширение 'Get cookies.txt' в Chrome\n2. Войдите в YouTube и экспортируйте cookies\n3. Загрузите файл 'youtube_cookies.txt' в репозиторий\n4. Перезапустите бота"
-        elif "Requested format is not available" in error_msg:
-            return None, "⚠️ Формат видео недоступен.\n\n💡 Попробуйте:\n• Ссылку на обычное видео (не Shorts)\n• Или подождите несколько минут"
+            return None, "⚠️ YouTube требует подтверждения.\n\n💡 Подождите 5-10 минут или попробуйте другое видео"
         elif "HTTP Error 429" in error_msg:
-            return None, "⚠️ Слишком много запросов к YouTube. Подождите 5-10 минут."
+            return None, "⚠️ Слишком много запросов к YouTube. Подождите 10-15 минут."
         else:
-            return None, f"Ошибка YouTube: {error_msg[:150]}"
+            return None, f"Ошибка: {error_msg[:150]}"
 
 async def download_youtube_shorts(url, message=None):
     """Специальная обработка для YouTube Shorts"""
     try:
         from yt_dlp import YoutubeDL
         
-        # Опции специально для Shorts
+        if message:
+            await message.edit_text("📱 Обрабатываю YouTube Shorts...")
+        
         ydl_opts = {
-            'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
+            'outtmpl': os.path.join(DOWNLOAD_DIR, 'shorts_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+            'format': 'best[height<=480]',  # Для Shorts достаточно 480p
             'merge_output_format': 'mp4',
-            'retries': 10,
-            'fragment_retries': 10,
+            'retries': 5,
+            'fragment_retries': 5,
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'extract_flat': False,
         }
         
         cookie_file = get_youtube_cookies()
         if cookie_file:
             ydl_opts['cookiefile'] = cookie_file
             logger.info("🍪 Используем cookies для YouTube Shorts")
-        
-        if message:
-            await message.edit_text("📥 Скачиваю YouTube Shorts...")
         
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -361,7 +370,7 @@ async def download_youtube_shorts(url, message=None):
         
     except Exception as e:
         logger.error(f"Shorts ошибка: {e}")
-        return None, str(e)[:150]
+        return None, f"Ошибка Shorts: {str(e)[:150]}"
 
 async def download_tiktok(url, message=None):
     """Скачивание из TikTok"""
@@ -400,27 +409,19 @@ async def download_tiktok(url, message=None):
         
     except Exception as e:
         logger.error(f"TikTok ошибка: {e}")
-        return None, str(e)
+        return None, str(e)[:150]
 
 async def download_music(url=None, query=None, message=None):
     """Скачивание музыки"""
     try:
         from yt_dlp import YoutubeDL
         
-        def progress_hook(d):
+        async def update_progress(d):
             if d['status'] == 'downloading' and message:
                 if 'total_bytes' in d:
                     percent = d['downloaded_bytes'] / d['total_bytes'] * 100
-                    if hasattr(download_music, 'last_update'):
-                        if time.time() - download_music.last_update > 1:
-                            download_music.last_update = time.time()
-                            asyncio.create_task(message.edit_text(
-                                f"🎵 Скачиваю... {percent:.0f}%"
-                            ))
-                    else:
-                        download_music.last_update = time.time()
-        
-        download_music.last_update = 0
+                    if percent % 10 < 1:  # Обновляем только каждые ~10%
+                        await message.edit_text(f"🎵 Скачиваю... {percent:.0f}%")
         
         if query:
             search_query = f"ytsearch:{query}"
@@ -434,7 +435,6 @@ async def download_music(url=None, query=None, message=None):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'progress_hooks': [progress_hook],
                 'retries': 5,
             }
         else:
@@ -448,7 +448,6 @@ async def download_music(url=None, query=None, message=None):
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'progress_hooks': [progress_hook],
                 'retries': 5,
             }
         
@@ -473,7 +472,7 @@ async def download_music(url=None, query=None, message=None):
         
     except Exception as e:
         logger.error(f"Music ошибка: {e}")
-        return None, str(e)
+        return None, str(e)[:150]
 
 def detect_platform(url):
     """Определяет платформу по ссылке"""
@@ -509,7 +508,7 @@ async def process_download(url, platform, message):
             return None, "Платформа не поддерживается"
     except Exception as e:
         logger.error(f"Ошибка скачивания: {e}")
-        return None, str(e)
+        return None, str(e)[:150]
 
 def create_choice_keyboard(files):
     """Создает клавиатуру для выбора файлов"""
@@ -603,7 +602,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 <b>О БОТЕ</b>
 
 <b>Universal Media Downloader Bot</b>
-<i>Версия 6.5</i>
+<i>Версия 7.0</i>
 
 ✨ <b>Возможности:</b>
 • Instagram (посты, Reels, карусели)
@@ -638,7 +637,6 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>⚠️ YouTube не работает?</b>
 • YouTube блокирует ботов. Подождите 5-10 минут
 • Попробуйте другое видео
-• Shorts обрабатываются отдельно
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(faq_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -812,7 +810,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             title=os.path.basename(file['path']).replace('.mp3', '')
                         )
                 
-                os.remove(file['path'])
+                if os.path.exists(file['path']):
+                    os.remove(file['path'])
                 await status_msg.delete()
                 
             except Exception as e:
@@ -871,47 +870,66 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         platform = user_downloads[user_id]['platform']
         
         for file in files:
-            with open(file['path'], 'rb') as f:
-                if file['type'] == 'video':
-                    await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
-                elif file['type'] == 'photo':
-                    await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
-                else:
-                    await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
-            os.remove(file['path'])
+            try:
+                with open(file['path'], 'rb') as f:
+                    if file['type'] == 'video':
+                        await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
+                    elif file['type'] == 'photo':
+                        await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
+                    else:
+                        await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
+            except Exception as e:
+                logger.error(f"Ошибка отправки файла: {e}")
+            
+            try:
+                if os.path.exists(file['path']):
+                    os.remove(file['path'])
+            except:
+                pass
         
         await query.message.edit_text("✅ Все файлы отправлены!")
-        del user_downloads[user_id]
+        if user_id in user_downloads:
+            del user_downloads[user_id]
         
     elif query.data.startswith("file_") and user_id in user_downloads:
         idx = int(query.data.split("_")[1])
-        file = user_downloads[user_id]['files'][idx]
-        platform = user_downloads[user_id]['platform']
-        
-        with open(file['path'], 'rb') as f:
-            if file['type'] == 'video':
-                await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
-            elif file['type'] == 'photo':
-                await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
+        if idx < len(user_downloads[user_id]['files']):
+            file = user_downloads[user_id]['files'][idx]
+            platform = user_downloads[user_id]['platform']
+            
+            try:
+                with open(file['path'], 'rb') as f:
+                    if file['type'] == 'video':
+                        await query.message.reply_video(video=f, caption=f"🎬 С {platform}")
+                    elif file['type'] == 'photo':
+                        await query.message.reply_photo(photo=f, caption=f"📸 С {platform}")
+                    else:
+                        await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
+            except Exception as e:
+                logger.error(f"Ошибка отправки: {e}")
+            
+            try:
+                if os.path.exists(file['path']):
+                    os.remove(file['path'])
+            except:
+                pass
+            
+            user_downloads[user_id]['files'].pop(idx)
+            
+            if not user_downloads[user_id]['files']:
+                del user_downloads[user_id]
+                await query.message.edit_text("✅ Файл отправлен!")
             else:
-                await query.message.reply_audio(audio=f, title=os.path.basename(file['path']).replace('.mp3', ''))
-        
-        os.remove(file['path'])
-        user_downloads[user_id]['files'].pop(idx)
-        
-        if not user_downloads[user_id]['files']:
-            del user_downloads[user_id]
-            await query.message.edit_text("✅ Файл отправлен!")
-        else:
-            await query.message.edit_text(
-                f"✅ Отправлено!\nОсталось {len(user_downloads[user_id]['files'])} файлов.",
-                reply_markup=create_choice_keyboard(user_downloads[user_id]['files'])
-            )
+                await query.message.edit_text(
+                    f"✅ Отправлено!\nОсталось {len(user_downloads[user_id]['files'])} файлов.",
+                    reply_markup=create_choice_keyboard(user_downloads[user_id]['files'])
+                )
         
     elif query.data == "cancel" and user_id in user_downloads:
         for file in user_downloads[user_id]['files']:
             try:
-                os.remove(file['path'])
+                if os.path.exists(file['path']):
+                    os.remove(file['path'])
             except:
                 pass
         del user_downloads[user_id]
@@ -930,7 +948,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def run_bot():
     """Запускает Telegram бота с повторными попытками"""
     import time
-    import requests
     
     logger.info("🤖 Инициализация Telegram бота...")
     
