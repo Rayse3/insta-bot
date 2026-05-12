@@ -41,7 +41,7 @@ ALLOWED_DOMAINS = [
     "instagram.com", "www.instagram.com",
     "twitter.com", "www.twitter.com", "x.com", "www.x.com",
 ]
-JS_RUNTIME = {"node": {"path": "node"}}  # Для обхода YouTube блокировок
+JS_RUNTIME = {"node": {"path": "node"}}
 
 # Создаем папку для скачиваний
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -199,7 +199,7 @@ def download_media(message, content, audio=False, format_id=None) -> None:
         return
     
     if not is_allowed_domain(url):
-        bot.reply_to(message, f"❌ Неподдерживаемая платформа.\n\nПоддерживаются: YouTube, TikTok, Instagram, Twitter")
+        bot.reply_to(message, "❌ Неподдерживаемая платформа.\n\nПоддерживаются: YouTube, TikTok, Instagram, Twitter")
         return
     
     if urlparse(url).netloc in {"www.youtube.com", "youtube.com", "youtu.be", "m.youtube.com", "youtube-nocookie.com"}:
@@ -207,8 +207,8 @@ def download_media(message, content, audio=False, format_id=None) -> None:
             bot.reply_to(message, "❌ Неверная ссылка YouTube")
             return
     
-    # Статусное сообщение
-    msg = bot.reply_to(message, f"📥 Начинаю скачивание...\n\n{SELG_Bot v{BOT_VERSION}}", parse_mode="HTML")
+    # Статусное сообщение (ИСПРАВЛЕНО)
+    msg = bot.reply_to(message, f"📥 Начинаю скачивание...\n\nSELG Bot v{BOT_VERSION}", parse_mode="HTML")
     video_title = round(time.time() * 1000)
     
     # Настройки yt-dlp
@@ -237,7 +237,7 @@ def download_media(message, content, audio=False, format_id=None) -> None:
             with open(cookie_file, "w") as f:
                 f.write(decrypted_data)
             ydl_opts["cookiefile"] = cookie_file
-            logger.info(f"🍪 Используются cookies для user {user_id}")
+            logger.info(f"Используются cookies для user {user_id}")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
