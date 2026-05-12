@@ -53,38 +53,34 @@ def format_size(size_bytes):
 
 # ========== INSTAGRAM ЧЕРЕЗ ПУБЛИЧНОЕ API ==========
 async def download_instagram(url, message=None):
-    """Скачивание Instagram через публичное API (без авторизации)"""
+    """Скачивание Instagram через yt-dlp с правильными опциями"""
     try:
-        # Извлекаем shortcode из URL
         shortcode_match = re.search(r'(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
         if not shortcode_match:
-            return None, "Не удалось определить пост. Убедитесь, что ссылка содержит /p/ или /reel/"
+            return None, "Не удалось определить пост"
         
         shortcode = shortcode_match.group(1)
-        is_reel = '/reel/' in url.lower()
         
         if message:
-            if is_reel:
-                await message.edit_text(f"🎬 Скачиваю Instagram Reel...")
-            else:
-                await message.edit_text(f"📸 Скачиваю Instagram пост...")
+            await message.edit_text(f"📸 Скачиваю Instagram пост...")
         
-        # Используем yt-dlp для Instagram (работает без авторизации для публичных постов)
+        # Исправленные опции для Instagram
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'instagram_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best',
+            'format': 'best',  # Упрощаем формат
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'extract_flat': False,
-            'retries': 5,
+            'retries': 10,
+            'ignoreerrors': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Проверяем существование файла
+            # Ищем файл с разными расширениями
             if not os.path.exists(filename):
                 for ext in ['.mp4', '.webm', '.mkv', '.jpg', '.png']:
                     test_path = filename.rsplit('.', 1)[0] + ext
@@ -96,31 +92,26 @@ async def download_instagram(url, message=None):
                 file_type = 'video' if filename.endswith(('.mp4', '.webm', '.mkv')) else 'photo'
                 return [{'path': filename, 'type': file_type, 'size': os.path.getsize(filename)}], 'single'
         
-        return None, "Не удалось скачать Instagram контент. Убедитесь, что пост публичный."
+        return None, "Не удалось скачать. Убедитесь, что пост публичный."
         
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Instagram ошибка: {error_msg}")
-        
-        if "Private" in error_msg:
-            return None, "❌ Этот аккаунт приватный. Instagram бот может скачивать только публичные посты."
-        elif "login" in error_msg.lower():
-            return None, "❌ Требуется авторизация. Сейчас поддерживаются только публичные посты."
-        else:
-            return None, f"Ошибка: {error_msg[:150]}"
+        return None, f"Ошибка: {error_msg[:150]}"
 
 # ========== СКАЧИВАНИЕ YOUTUBE ==========
 async def download_youtube(url, message=None):
-    """Скачивание YouTube видео (стабильно)"""
+    """Скачивание YouTube видео с правильными опциями"""
     try:
         if message:
-            await message.edit_text("📥 Подготавливаю скачивание YouTube...")
+            await message.edit_text("📥 Скачиваю YouTube видео...")
         
+        # Исправленные опции для YouTube
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, 'youtube_%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'format': 'best[height<=720]',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4',
             'retries': 10,
             'fragment_retries': 10,
@@ -157,7 +148,7 @@ async def download_youtube(url, message=None):
 
 # ========== СКАЧИВАНИЕ TIKTOK ==========
 async def download_tiktok(url, message=None):
-    """Скачивание TikTok видео с обходом блокировки"""
+    """Скачивание TikTok видео"""
     try:
         if message:
             await message.edit_text("🎵 Скачиваю TikTok видео...")
@@ -169,8 +160,8 @@ async def download_tiktok(url, message=None):
             'format': 'best',
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'extract_flat': False,
-            'retries': 5,
-            'fragment_retries': 5,
+            'retries': 10,
+            'fragment_retries': 10,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -215,7 +206,7 @@ async def search_and_download_music(query, message=None):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'retries': 5,
+            'retries': 10,
             'default_search': 'ytsearch',
         }
         
@@ -252,7 +243,7 @@ async def download_music_from_url(url, message=None):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'retries': 5,
+            'retries': 10,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -368,7 +359,6 @@ async def platforms_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔒 <b>Ограничения Instagram:</b>
 • Только публичные аккаунты
-• Приватные аккаунты не поддерживаются
 
 💡 <b>Как скачать музыку:</b>
 Напишите: <code>песня Название песни</code>
@@ -385,13 +375,12 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>❌ Почему не скачивается Instagram?</b>
 • Убедитесь, что аккаунт публичный
 • Проверьте правильность ссылки
-• Instagram может блокировать запросы
 
 <b>🎵 Как скачать музыку по названию?</b>
 Напишите: <code>песня Название песни</code>
 
 <b>⏳ Почему долго скачивается?</b>
-Зависит от размера файла и скорости интернета
+Зависит от размера файла
 
 <b>⚠️ TikTok выдаёт ошибку?</b>
 TikTok иногда блокирует запросы. Подождите 5-10 минут
@@ -422,9 +411,7 @@ async def music_search_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • SoundCloud
    • Spotify
 
-📌 <b>Поддерживаемые форматы:</b> MP3 (192 kbps)
-
-💡 <b>Совет:</b> Чем точнее название, тем лучше результат
+📌 <b>Формат:</b> MP3 (192 kbps)
 """
     if update.callback_query:
         await update.callback_query.message.edit_text(music_text, parse_mode='HTML', reply_markup=get_back_keyboard())
@@ -441,7 +428,6 @@ async def contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 <b>Обращаться по любым вопросам:</b>
 • Ошибки в работе бота
 • Предложения по улучшению
-• Новые идеи для функционала
 
 ⏰ <b>Время ответа:</b>
 Обычно в течение 24 часов
